@@ -1,0 +1,7 @@
+# Written by Claude Code each time it loads the plugin
+.claude-plugin/types/
+node_modules/
+.DS_Store
+
+# Local notes, not part of the plugin
+gitignored/
