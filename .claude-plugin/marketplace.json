@@ -9,7 +9,7 @@
       "name": "codemode",
       "source": "./",
       "description": "A codemode tool: the model writes a JavaScript script that calls Claude Code's tools and MCP tools in a sandbox, and only the script's output reaches the model.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "homepage": "https://github.com/luke3butler/cccm",
       "repository": "https://github.com/luke3butler/cccm",
       "license": "MIT"

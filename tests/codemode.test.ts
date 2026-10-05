@@ -24,6 +24,7 @@ function stubPlace(on: TestOn): void {
   on('session.cwd', () => ({ value: '/work/sub' }))
   on('session.root', () => ({ value: '/work' }))
   on('session.repo', () => ({ value: { root: '/work', remote: 'git@example.com:me/work.git', internal: false, name: null } }))
+  on('session.turns', () => ({ value: 3 }))
 }
 
 async function run($: Engine, script: string, extra: Record<string, unknown> = {}): Promise<string> {
@@ -251,7 +252,26 @@ test('a script reads the session facts', async ($, on) => {
   expect(text).toContain('"cwd": "/work/sub"')
   expect(text).toContain('"projectDir": "/work"')
   expect(text).toContain('"remote": "git@example.com:me/work.git"')
+  expect(text).toContain('"turns": 3')
   expect(text).not.toContain('internal')
+})
+
+test('a script reads session.usage() and session.messages() as the engine answers them', async ($, on) => {
+  stubEngine(on)
+  const asked: unknown[] = []
+  on('session.usage', (_$, e) => {
+    asked.push(e)
+    return { value: { startedAt: 1, context: { tokens: 24000, window: 200000, percent: 12 }, rateLimits: [{ kind: 'five_hour', percentUsed: 7 }], cost: { usd: 0.5 } } }
+  })
+  on('session.messages', () => ({ value: [{ role: 'user', text: 'hello', toolUses: [] }] }))
+
+  const text = await run($, 'const u = await session.usage({ breakdown: "summary" })\nconst m = await session.messages()\nreturn [u.context.percent, u.rateLimits[0].kind, u.cost.usd, m[0].text]')
+
+  expect(text).toContain('Script completed')
+  expect(text).toContain('12')
+  expect(text).toContain('five_hour')
+  expect(text).toContain('hello')
+  expect(JSON.stringify(asked)).toContain('summary')
 })
 
 test('a Read Claude Code answers as unchanged is read again for the script', async ($, on) => {

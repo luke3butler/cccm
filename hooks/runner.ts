@@ -62,7 +62,7 @@ return help("panes") reads a topic's detail and examples; help() lists the topic
 Globals:
 - tools.<name>(args): call a tool with one object of arguments (mcp__dev-radius__search is tools.mcp__dev_radius__search), through the same permission checks and hooks as your own calls. Built-in tools resolve to { text, result }: text is what you would read, result the tool's structured record (Bash: stdout, stderr; Read: result.file.content, the raw text). Bash rejects on a non-zero exit, the output in the error; end a command with "|| true" to read a failing one's output. MCP tools resolve to { content, structuredContent, text }. A failed or denied call rejects with the tool's error text; Promise.allSettled() keeps the calls that succeed. An output Claude Code would show you as a preview is whole in text, up to 4 MiB. help("tools")
 - ALL_TOOLS, searchTools(query, { limit?, namespace? }), describeNamespace(server), describeTool(name): find tools and their arguments (describeTool's declaration is the input type as TypeScript). Most MCP tools are not in your own tool list.
-- session: { id, cwd, projectDir, repo }.
+- session: { id, cwd, projectDir, repo, turns (prompts sent) }. session.usage({ breakdown? }) resolves { startedAt, context, rateLimits, cost }; breakdown "full" sends a token-count request per tool, "summary" doesn't. session.messages({ agentId?, as?: "api" }) resolves the transcript as { role, text, toolUses, toolResults? } rows.
 - text(value), console.log(...) and a top-level return make the output; image(value) adds an image; exit() ends the script successfully. help("output")
 - sleep(ms).
 - models.complete({ prompt, model?, system?, maxTokens?, effort? }) resolves { text, usage }; models.classify(text, labels) resolves one of labels or undefined. They cost tokens: use them over many items whose raw text would fill your context. help("models")
@@ -124,6 +124,10 @@ export type Host = {
   classify: (text: string, labels: string[], model: string | undefined) => Promise<string | undefined>
   /** The session facts a script reads as `session`, once per run. */
   sessionFacts: () => Promise<SessionFacts>
+  /** `$.session.usage(args)`, as the engine answers it. */
+  sessionUsage: (args: Record<string, unknown> | undefined) => Promise<unknown>
+  /** `$.session.messages(args)`, as the engine answers it. */
+  sessionMessages: (args: Record<string, unknown> | undefined) => Promise<unknown>
   /** Shows the script's tool calls so far in its row; fire and forget. */
   showCalls?: (calls: CodemodeCalls) => void
   /** Shows the file changes the script's tool calls made under its result, as Bash's row does; called once, at the end. */
@@ -133,7 +137,7 @@ export type Host = {
 }
 
 /** What a script reads as `session`. */
-export type SessionFacts = { id: string; cwd: string; projectDir: string; repo: { root: string; remote: string | null } | null }
+export type SessionFacts = { id: string; cwd: string; projectDir: string; repo: { root: string; remote: string | null } | null; turns: number }
 
 export type RunContext = {
   signal: AbortSignal
@@ -366,6 +370,17 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
         : undefined,
   })
 
+  /** A `session` method: its one optional argument as plain JSON, the engine's answer as plain data, shown as a row. */
+  const sessionCall = (name: string, call: (args: Record<string, unknown> | undefined) => Promise<unknown>) => async (args?: unknown) => {
+    check()
+    if (args !== undefined && (typeof args !== 'object' || args === null || Array.isArray(args))) {
+      throw new TypeError(`session.${name}() takes one object of arguments, or none.`)
+    }
+    const plain = args === undefined ? undefined : (JSON.parse(JSON.stringify(args)) as Record<string, unknown>)
+    const value = await recorded(`session.${name}`, plain === undefined ? '' : argsPreview(plain), () => track(() => call(plain)), () => false)
+    return structuredClone(value)
+  }
+
   const print = (...values: unknown[]) => {
     output.push(values.map(formatValue).join(' '))
   }
@@ -376,7 +391,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
       line = at
     },
     tools,
-    session: structuredClone(facts),
+    session: { ...structuredClone(facts), usage: sessionCall('usage', host.sessionUsage), messages: sessionCall('messages', host.sessionMessages) },
     models,
     ALL_TOOLS: entries.map(entry => ({ ...entry })),
     searchTools: async (query: unknown, options: { limit?: number; namespace?: string } = {}) =>

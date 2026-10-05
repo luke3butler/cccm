@@ -207,9 +207,17 @@ function scriptHost($: EngineInterface, extra: Pick<Host, 'showCalls' | 'showDif
     complete: (request, signal) => $.model.complete(request, { signal }),
     classify: (text, labels, model) => $.model.classify(text, labels, model === undefined ? undefined : { model }),
     sessionFacts: async () => {
-      const [id, cwd, projectDir, repo] = await Promise.all([$.session.id(), $.session.cwd(), $.session.root(), $.session.repo().catch(() => null)])
-      return { id, cwd, projectDir, repo: repo === null ? null : { root: repo.root, remote: repo.remote } }
+      const [id, cwd, projectDir, repo, turns] = await Promise.all([
+        $.session.id(),
+        $.session.cwd(),
+        $.session.root(),
+        $.session.repo().catch(() => null),
+        $.session.turns(),
+      ])
+      return { id, cwd, projectDir, repo: repo === null ? null : { root: repo.root, remote: repo.remote }, turns }
     },
+    sessionUsage: args => $.session.usage(args as Parameters<typeof $.session.usage>[0]),
+    sessionMessages: args => (args === undefined ? $.session.messages() : $.session.messages(args as Parameters<typeof $.session.messages>[0])),
     ...extra,
     panes: paneHost($),
   }

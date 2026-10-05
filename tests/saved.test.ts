@@ -28,6 +28,7 @@ function stubSaved(on: TestOn, files: Record<string, string>): void {
   on('session.cwd', () => ({ value: '/work' }))
   on('session.root', () => ({ value: '/work' }))
   on('session.repo', () => ({ value: null }))
+  on('session.turns', () => ({ value: 1 }))
   on('env.get', (_$, e) => ({ value: (e as { name?: string }).name === 'HOME' ? '/home/me' : undefined }))
   const dirOf = (path: string) => path.replace(/\/$/, '')
   on('fs.exists', (_$, e) => {

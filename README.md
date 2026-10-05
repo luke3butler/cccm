@@ -64,7 +64,9 @@ A first line `// @options: {"max_output_tokens": 2000, "timeout_ms": 60000}` set
 | `searchTools(query, { limit?, namespace? })` | Tools ranked by relevance (BM25). `limit` defaults to 8; `namespace` is an MCP server name |
 | `describeTool(name)` | `{ name, description, mcp, declaration? }`, the declaration being the tool's input type as TypeScript |
 | `describeNamespace(server)` | `{ name, tools }` for an MCP server, or `undefined` |
-| `session` | `{ id, cwd, projectDir, repo }`, read once per run. `repo` is `{ root, remote }`, or `null` outside a git repository |
+| `session` | `{ id, cwd, projectDir, repo, turns }`, read once per run. `repo` is `{ root, remote }`, or `null` outside a git repository; `turns` is how many prompts the person has sent |
+| `session.usage({ breakdown?, columns? })` | `$.session.usage` as the engine answers it: `{ startedAt, context, rateLimits, cost }`. `breakdown: "full"` sends a token-count request per tool and memory file, as /context does; `"summary"` estimates locally |
+| `session.messages({ agentId?, as? })` | `$.session.messages` as the engine answers it: the newest 4096 messages as `{ role, text, toolUses, toolResults? }`, or `{ role, content }` with `as: "api"`; with `agentId`, that agent's, or `{ deny }` |
 | `models.complete({ prompt, model?, system?, maxTokens?, effort? })` | One completion through the session's own client, with no tools or history. Resolves `{ text, usage }`; rejects when no reply came |
 | `models.classify(text, labels, { model? })` | The one of `labels` (two or more) a small, fast model picks, or `undefined` |
 | `text(value)`, `console.log(...)` | Add to the output: strings as they are, other values as JSON. A top-level `return` adds its value the same way |
@@ -194,10 +196,7 @@ Parts of Claude Code's plugin API (`$`) that codemode doesn't pass to scripts.
 
 | Area | Not available | API |
 |---|---|---|
-| Session | The transcript's messages | `$.session.messages` |
-|  | The session's model | `$.session.model` |
-|  | How many prompts the user has sent | `$.session.turns` |
-|  | Token usage and context breakdown | `$.session.usage` |
+| Session | The session's model | `$.session.model` |
 |  | Which surfaces the session draws on (terminal, desktop, ...) | `$.session.surfaces` |
 |  | Claude Code's version | `$.session.version` |
 |  | Compacting the conversation | `$.session.compact` |

@@ -19,6 +19,7 @@ function stubEngine(on: TestOn, opened: { id: string; title?: string }[] = [], s
   on('session.cwd', () => ({ value: '/work' }))
   on('session.root', () => ({ value: '/work' }))
   on('session.repo', () => ({ value: null }))
+  on('session.turns', () => ({ value: 1 }))
   on('session.surfaces', () => ({ value: surfaces }))
   on('ui.open', (_$, e) => {
     opened.push({ id: e.id, title: e.title })

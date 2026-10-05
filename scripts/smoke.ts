@@ -45,7 +45,9 @@ const host: Host = {
       : { isAnswered: true, text: `${request.model}: ${request.prompt}`, usage }
   },
   classify: async (text, labels) => labels[text.length % labels.length],
-  sessionFacts: async () => ({ id: 'smoke', cwd: '/work/sub', projectDir: '/work', repo: { root: '/work', remote: null } }),
+  sessionFacts: async () => ({ id: 'smoke', cwd: '/work/sub', projectDir: '/work', repo: { root: '/work', remote: null }, turns: 3 }),
+  sessionUsage: async args => ({ startedAt: 1, context: { window: 200000, percent: 12 }, rateLimits: [], cost: { usd: 0.5 }, args }),
+  sessionMessages: async args => (args?.agentId === 'gone' ? { deny: 'no such agent' } : [{ role: 'user', text: 'hi', toolUses: [] }]),
   saveStore: async () => {},
   saveOutput: async () => undefined,
   readFile: async path => (path === '/notes.md' ? 'one\ntwo\nthree\n' : `full ${path}`),
@@ -64,7 +66,9 @@ const ctx = { signal: new AbortController().signal, budget: { remainingMs: Infin
 const checks: [string, string, string][] = [
   ['full Bash output', 'const b = await tools.Bash({ command: "x" })\nreturn b.result.stdout + "|" + b.fullOutputPath', 'full /saved/bash.txt|/saved/bash.txt'],
   ['full MCP output', 'const m = await tools.mcp__big__dump({})\nreturn m.content[0].text', 'full /saved/mcp.txt'],
-  ['session facts', 'return [session.id, session.cwd, session.projectDir, session.repo.root].join(" ")', 'smoke /work/sub /work /work'],
+  ['session facts', 'return [session.id, session.cwd, session.projectDir, session.repo.root, session.turns].join(" ")', 'smoke /work/sub /work /work 3'],
+  ['session.usage', 'const u = await session.usage({ breakdown: "summary" })\nreturn [u.context.percent, u.cost.usd, u.args.breakdown].join(" ")', '12 0.5 summary'],
+  ['session.messages', 'const m = await session.messages()\nconst d = await session.messages({ agentId: "gone" })\nreturn m[0].text + " " + d.deny', 'hi no such agent'],
   ['models.complete', 'return (await models.complete({ prompt: "hi" })).text', 'haiku: hi'],
   ['model calls in the header', 'await Promise.all([1, 2].map(n => models.complete({ prompt: String(n) })))', '0 tool calls, 2 model calls (2.0k tokens)'],
   ['models.complete without a reply rejects', 'await models.complete({ prompt: "overloaded" })', 'no reply (api-error 529 overloaded_error)'],

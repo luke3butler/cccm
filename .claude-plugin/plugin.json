@@ -1,6 +1,6 @@
 {
   "name": "codemode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A codemode tool: the model writes a JavaScript script that calls Claude Code's tools and MCP tools in a sandbox, and only the script's output reaches the model.",
   "author": {
     "name": "Luke"
