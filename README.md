@@ -85,7 +85,7 @@ The reference in the `script` parameter's description is in the model's context 
 | Call | Resolves to | On failure |
 |---|---|---|
 | Built-in tool | `{ text, result }`: `text` is what the model would read, `result` the tool's structured record (for Bash: `stdout`, `stderr`, ...; for Read, `file.content` is the raw text) | Rejects with the tool's error text, denied calls included |
-| MCP tool | `{ content, structuredContent, text, json }`, `json` being `structuredContent` when the server sends one, else `text` parsed when it's a JSON object or array | Rejects with the server's error text, denied calls included; the error's `result` holds the whole reply |
+| MCP tool | `{ content, structuredContent, text, json }`, `json` being `structuredContent` when the server sends one, else `text` parsed when all of it is one JSON object or array. Text that is JSON and more has no `json`, and the script reads `text` | Rejects with the server's error text, denied calls included; the error's `result` holds the whole reply |
 | Long output | `text` (and Bash's `result.stdout`) hold the whole output, up to 4 MiB; `fullOutputPath` names the saved file. An MCP result Claude Code replaced with a notice naming its file is read back from that file, found by where it is (this session's `tool-results` folder), when it was written (during the call) and its size, not by the notice's wording | Rejects when the result looks like such a notice but its file can't be found or read, and logs a line saying so, so a script never takes the notice for data |
 | Read of a file the conversation already holds | The file's text in Read's numbered-line format, not Claude Code's "file unchanged" stub | |
 

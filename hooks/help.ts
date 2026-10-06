@@ -25,7 +25,7 @@ const TOPICS: Record<string, Topic> = {
 Records beyond { text, result }:
 - Bash: result.stdout, result.stderr, result.interrupted.
 - Read: text has line numbers, result.file.content does not. Pass an image file's result to image().
-- MCP: json is structuredContent when the server sends one, else text parsed when it is a JSON object or array; without it, read text. A rejected MCP call's error.result holds the whole reply.
+- MCP: json is structuredContent when the server sends one, else text parsed when all of it is one JSON object or array. Text that is JSON and more (JSON then markdown, one object per line) has no json: read text, and parse it once you know its form. A rejected MCP call's error.result holds the whole reply.
 - fullOutputPath: the file Claude Code saved a long output to; readFile(fullOutputPath) reads it back in a later script.
 - Grep and Glob are not in every session; Bash with rg or find always is.
 
