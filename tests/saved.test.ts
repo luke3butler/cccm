@@ -123,7 +123,7 @@ test('the tool runs a saved script by name with its args checked', async ($, on)
   expect(await run($, { name: 'ping' })).toContain('Script failed: ping needs the arg "host"')
   expect(await run($, { name: 'pong' })).toContain('Script failed: no saved script "pong". Saved: ping.')
   expect(await run($, { name: 'ping', script: 'return 1' })).toContain('not both')
-  expect(await run($, { script: 'return 1', args: { a: 1 } })).toContain('args are for a saved script')
+  expect(await run($, { script: 'return 1', args: [1] })).toContain('Script failed: args is an object')
 })
 
 test('/codemode runs a saved script from the words typed, and alone lists them', async ($, on) => {

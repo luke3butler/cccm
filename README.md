@@ -49,7 +49,7 @@ bun scripts/smoke.ts
 |---|---|---|
 | `script` | one of `script` and `name` | Raw JavaScript, run as the body of an async function: top-level `await` and `return` work |
 | `name` | | A [saved script](#saved-scripts) to run in place of `script` |
-| `args` | `{}` | The saved script's args, which it reads as the `args` global |
+| `args` | `{}` | Values the script reads as the `args` global. Text it passes on (markdown, code, anything with quotes, backticks or backslashes) goes here rather than into the script as a string literal, so it needs no escaping. A saved script's are checked against its `meta` |
 | `max_output_tokens` | 10000 | Output past it keeps its start and end, and the full text goes to a temp file. At most 12000: Claude Code saves a result past about 50,000 characters to a file and shows only a preview, so a higher value is lowered, and the result says so when it matters |
 | `timeout_ms` | unset | A wall-clock deadline for the whole script, tool calls included |
 
@@ -75,7 +75,7 @@ A first line `// @options: {"max_output_tokens": 2000, "timeout_ms": 60000}` set
 | `writeFile(path, value)`, `readFile(path)` | `writeFile` is a `tools.Write` call: a string as it is, any other value as JSON; a relative path is from the session's directory; resolves to the path. `readFile` resolves a file's text, up to 4 MiB, past Read's 256 KB limit. A file codemode saved (a long output, a failed script's reply) or Claude Code saved from this session's tool calls is read as it is; any other first goes through a `tools.Read` from past its end, which reads nothing, so Read's rules, hooks and dialog decide |
 | `table(text, { split?, header? })` | Command output in columns (iostat, ps, df, CSV) as rows keyed by its header line, plain numbers as numbers |
 | `ui`, `h()` | Panes beside the transcript; see [Panes](#panes) |
-| `args` | A saved script's args, checked against its `meta`; see [Saved scripts](#saved-scripts) |
+| `args` | The `args` parameter, `{}` when none; a saved script's are checked against its `meta` (see [Saved scripts](#saved-scripts)) |
 | `help(topic?)` | The long form of the reference: `help()` lists the topics (`tools`, `output`, `models`, `panes`, `saved`), `help("panes")` returns one with worked examples |
 
 The reference in the `script` parameter's description is in the model's context every turn, so it keeps the signatures and the rules that change how the model works (such as not waiting on the person) and points at a topic for the rest. A topic is read only when a script asks for it.
@@ -120,7 +120,7 @@ Plugins can't read tools' schemas: `$.tool.list()` gives names and descriptions,
 
 ### The row in the transcript
 
-The tool's row shows the script, folded to 8 lines with a button that shows all of it; a saved script run by name shows its name in the title and its args below. Below it are the latest 8 nested calls, with live status (running, ok, failed, cancelled) and duration. A failed script's row has a red bullet and says "script failed" (Claude Code itself draws the call as a success, since a plugin's tool can't answer with an error).
+The tool's row shows the script, folded to 8 lines with a button that shows all of it; a saved script run by name shows its name in the title, and args, inline or saved, show below as one line. Below it are the latest 8 nested calls, with live status (running, ok, failed, cancelled) and duration. A failed script's row has a red bullet and says "script failed" (Claude Code itself draws the call as a success, since a plugin's tool can't answer with an error).
 
 The result under the row is codemode's too: the output without its header line (the row's title has the counts), the first 5 lines with a button that shows the rest, and a failed script's error and calls in full. A result with images, and a call Claude Code itself refused or interrupted, keep Claude Code's own result block.
 

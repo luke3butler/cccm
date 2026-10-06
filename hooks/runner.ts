@@ -90,7 +90,7 @@ Globals:
 - sleep(ms).
 - models.complete({ prompt, model?, system?, maxTokens?, effort? }) resolves { text, usage }; models.classify(text, labels, { model? }) resolves one of labels or undefined. They cost tokens: use them over many items whose raw text would fill your context. help("models")
 - table(text or lines): command output in columns (iostat, ps, df) as rows keyed by its header, numbers as numbers.
-- args: a saved script's args (the name parameter); help("saved") says how to save a script.
+- args: the args parameter's value ({} when none). Text the script passes on (markdown, code, anything with quotes, backticks or backslashes) goes there, not in a string literal. help("saved") says how to save a script.
 - store(key, value) / load(key): JSON values across scripts in this session (256K characters each, 1M in all), kept only when the script succeeds; store(key, undefined) deletes.
 - ui and h(): panes beside the transcript that outlive the script; later scripts change them by id. ui.open({ id, title, ask?, view: h(...) }), ui.update, ui.set(id, "data.x", value), ui.append(id, "data.log", items), ui.follow(id, outputFile, { to, status }) (a background task's output, live after your turn ends), ui.take(id), ui.panes(), ui.close(id), ui.remove(id). To ask the person something, don't wait for them: open a pane with ask and a push: "wake" button, return, and end your turn. Elements: Box, Text, Button, Input, Select, Markdown, Code, Link, Image, Chart; any takes when: { "values.tab": "logs" }. A pane can carry code: render(state) draws it, on: { name: fn } runs on presses, every: { ms, run } polls slowly. Live data: ui.stream(id, command, { to }) runs a command and follows its output, not every. help("panes") has their props, binding, push routes, follows and layouts; read it before your first pane.
 
@@ -106,7 +106,11 @@ export function inputSchema(saved = '') {
         type: 'string',
         description: `A saved script to run in place of script, by its name. It reads args as the args global. help("saved") says how to save one.\n\n${saved}`,
       },
-      args: { type: 'object', description: "The saved script's args, checked against those its meta declares." },
+      args: {
+        type: 'object',
+        description:
+          "Values the script reads as the args global. Text the script passes on (markdown, code, anything with quotes, backticks or backslashes) goes here, not into the script as a string literal. A saved script's args are checked against its meta.",
+      },
       max_output_tokens: {
         type: 'integer',
         minimum: 1,

@@ -34,7 +34,7 @@ export function drawToolUse(
 ): RenderElement {
   const input = props.input as { script?: unknown; name?: unknown; args?: unknown } | undefined
   const script = input?.script
-  // A saved script run by name shows its name in the title and its args below.
+  // A saved script run by name shows its name in the title and its args below; an inline script's args follow it.
   const saved = typeof input?.name === 'string' ? input.name : undefined
   const args = typeof input?.args === 'object' && input.args !== null && Object.keys(input.args).length > 0 ? JSON.stringify(input.args) : undefined
   const lines = typeof script === 'string' ? plainText(script).trimEnd().split('\n') : args !== undefined ? [plainText(args)] : []
@@ -70,6 +70,11 @@ export function drawToolUse(
             label={expand.isExpanded ? 'Show less' : `… ${hiddenLines} more line${plural} (show all)`}
             onPress={expand.onToggle}
           />
+        ) : null}
+        {typeof script === 'string' && args !== undefined ? (
+          <Text dimColor wrap="truncate-end">
+            {`args ${plainText(args)}`}
+          </Text>
         ) : null}
       </Box>
       {calls !== undefined && calls.recent.length > 0 ? (

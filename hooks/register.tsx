@@ -931,8 +931,10 @@ export const register: Register = on => {
       if ('error' in saved) return { result: `Script failed: ${saved.error}` }
       script = saved.script
       globals = { args: saved.args }
-    } else if (args.args !== undefined) {
-      return { result: 'Script failed: args are for a saved script, run by name.' }
+    } else if (args.args === undefined || (typeof args.args === 'object' && args.args !== null && !Array.isArray(args.args))) {
+      globals = { args: args.args ?? {} }
+    } else {
+      return { result: 'Script failed: args is an object of values the script reads as args.' }
     }
     const run = await runScript(
       host,

@@ -695,6 +695,22 @@ test('a failed script waits for its tool calls still running, and reports how th
   expect(text).toContain('json: { id: string }')
 })
 
+test('an inline script reads args, which reach a tool byte for byte', async ($, on) => {
+  stubEngine(on)
+  let received: unknown
+  on('tool.call', { tool: /^mcp__dev-radius__search$/ }, async (_$, e) => {
+    received = (e as { query?: unknown }).query
+    return { result: { content: [{ type: 'text', text: 'ok' }] }, text: 'ok' }
+  })
+  const body = '## Code\n\n```ts\nconst s = `Hi, ${name}!`\nconst p = "C:\\\\Users\\\\luke"\n```\n\nA regex: /^\\s*\\/\\/\\s*$/ and \'quotes\' "both" ways.'
+
+  const text = await run($, 'await tools.mcp__dev_radius__search({ query: args.body })\nreturn Object.keys(args)', { args: { body } })
+
+  expect(text).toContain('Script completed')
+  expect(received).toBe(body)
+  expect(await run($, 'return JSON.stringify(args)')).toContain('{}')
+})
+
 test('a tool call still running when the script ends is cancelled', async ($, on) => {
   stubEngine(on)
   let isAborted = false
