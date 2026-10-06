@@ -234,16 +234,30 @@ const kv: KeyValue = {
   delete: async key => void map.delete(key),
   keys: async () => [...map.keys()],
 }
-await saveSessionStore(kv, 'a', { cursor: 1 })
-await saveSessionStore(kv, 'b', { cursor: 2 })
+await saveSessionStore(kv, 'a', new Map([['cursor', 1]]))
+await saveSessionStore(kv, 'b', new Map([['cursor', 2]]))
 const loaded = [(await loadSessionStore(kv, 'a')).cursor, (await loadSessionStore(kv, 'b')).cursor, Object.keys(await loadSessionStore(kv, 'none')).length]
 report('store per session', JSON.stringify(loaded) === '[1,2,0]', JSON.stringify(loaded))
 for (let i = 0; i < 60; i++) {
-  await saveSessionStore(kv, `s${i}`, { i })
+  await saveSessionStore(kv, `s${i}`, new Map([['i', i]]))
   await Bun.sleep(1)
 }
 report('store keeps the 50 newest', map.size === 50 && map.has('session:s59') && !map.has('session:a'), `${map.size} ${[...map.keys()].slice(0, 3)}`)
-await saveSessionStore(kv, 's59', {})
+await saveSessionStore(kv, 's59', new Map([['i', undefined]]))
 report('store drops an emptied session', !map.has('session:s59'), [...map.keys()].join(' '))
+
+// Two scripts saving at once, reads and writes slow enough that both would read before either writes.
+const slow: KeyValue = {
+  ...kv,
+  get: async key => (await Bun.sleep(20), structuredClone(map.get(key))),
+  set: async (key, value) => (await Bun.sleep(20), void map.set(key, structuredClone(value))),
+}
+await saveSessionStore(kv, 'pair', new Map([['kept', 1], ['dropped', 1]]))
+await Promise.all([
+  saveSessionStore(slow, 'pair', new Map([['first', 1], ['dropped', undefined]])),
+  saveSessionStore(slow, 'pair', new Map([['second', 2]])),
+])
+const pair = await loadSessionStore(kv, 'pair')
+report('scripts saving at once keep each other\'s keys', JSON.stringify(pair) === '{"kept":1,"first":1,"second":2}', JSON.stringify(pair))
 
 process.exit(failed === 0 ? 0 : 1)

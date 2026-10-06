@@ -246,6 +246,26 @@ test('store() writes only when the script succeeds, under the session id', async
   expect(writes).toEqual([['session:s1', { cursor: 4 }]])
 })
 
+test('scripts running side by side keep each other\'s stored keys', async ($, on) => {
+  const saved = new Map<string, unknown>()
+  on('tool.list', () => ({ value: TOOLS }))
+  on('session.id', () => ({ value: 's1' }))
+  stubPlace(on)
+  on('store.get', (_$, e) => ({ value: structuredClone(saved.get(e.key)) }))
+  on('store.set', (_$, e) => {
+    saved.set(e.key, structuredClone(e.value))
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...saved.keys()] }))
+  on('clock.sleep', () => new Promise(resolve => setTimeout(() => resolve({ value: undefined }), 20)))
+
+  // Both load the store before either saves.
+  const texts = await Promise.all([run($, 'await sleep(20)\nstore("a", 1)'), run($, 'await sleep(20)\nstore("b", 2)')])
+  expect(texts.every(text => text.startsWith('Script completed'))).toBe(true)
+
+  expect((saved.get('session:s1') as { values: unknown }).values).toEqual({ a: 1, b: 2 })
+})
+
 test('a script awaiting a promise that never settles fails at once', async ($, on) => {
   stubEngine(on)
   on('clock.sleep', () => ({ value: undefined }))

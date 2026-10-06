@@ -8,6 +8,7 @@ import { addDiffs, fileDiffsOf } from './diffs'
 import { helpText, type HelpLimits } from './help'
 import { h, paneGlobals, taskFileOf, type PaneHost } from './panes'
 import { shape } from './shape'
+import type { StoreChanges } from './store'
 import { table } from './table'
 import { plainText } from './text'
 import { AT, TICK, guard, joinToolNames, keepSources } from './guard'
@@ -128,7 +129,8 @@ export type Host = {
   listTools: () => Promise<ToolInfo[]>
   callTool: (input: { tool: string } & Record<string, unknown>) => Promise<ToolCallResult>
   loadStore: () => Promise<Record<string, CodemodeJson>>
-  saveStore: (values: Record<string, CodemodeJson>) => Promise<void>
+  /** Applies a script's store() calls onto the session's values as saved now. */
+  saveStore: (changes: StoreChanges) => Promise<void>
   /** Writes a long output in full and answers its path, or undefined when it could not. */
   saveOutput: (name: string, text: string) => Promise<string | undefined>
   /** Reads a file Claude Code saved a long tool output to; rejects past the read limit. */
@@ -243,7 +245,8 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
 
   const [loaded, facts] = await Promise.all([host.loadStore(), host.sessionFacts()])
   const stored: Record<string, CodemodeJson> = { ...loaded }
-  let hasStored = false
+  /** What store() changed, saved when the script succeeds; another script's keys stay as it left them. */
+  const changes: StoreChanges = new Map()
 
   // Ends the host waits (sleeps, the deadline) once the script is over.
   const stop = new AbortController()
@@ -505,6 +508,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
       if (typeof key !== 'string') throw new TypeError('store() takes a string key.')
       if (value === undefined) {
         delete stored[key]
+        changes.set(key, undefined)
       } else {
         const json = JSON.stringify(value)
         if (json === undefined) throw new TypeError('store() takes a JSON value.')
@@ -516,8 +520,8 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
           delete stored[key]
           throw new RangeError(`store(): all values together may be at most ${MAX_STORED_TOTAL_CHARS} characters of JSON.`)
         }
+        changes.set(key, stored[key])
       }
-      hasStored = true
     },
     load: (key: unknown) => {
       const value = stored[String(key)]
@@ -606,7 +610,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
   // Pane writes the script did not await land before its result does.
   await host.panes?.flush()
   if (diffs.files.length > 0) await host.showDiffs?.(diffs).catch(() => {})
-  if (error === undefined && hasStored) await host.saveStore(stored)
+  if (error === undefined && changes.size > 0) await host.saveStore(changes)
 
   const replyPaths = error === undefined ? undefined : await saveReplies(host, made.slice(-FAILURE_CALLS), replies, identifierOf(ctx.toolUseId))
   const text = await formatResult({

@@ -15,21 +15,44 @@ export type KeyValue = {
 
 type Entry = { savedAt: number; values: Record<string, CodemodeJson> }
 
+/** A script's store() calls, by key: the value it set, or undefined for a key it deleted. */
+export type StoreChanges = Map<string, CodemodeJson | undefined>
+
 const PREFIX = 'session:'
 const MAX_SESSIONS = 50
 /** Under $.store's 4 MiB, with room for the entry being written. */
 const MAX_TOTAL_CHARS = 3_000_000
+
+/** Each session's save in progress: two scripts' saves run one after the other, so neither reads before the other writes. */
+const saving = new Map<string, Promise<void>>()
 
 export async function loadSessionStore(kv: KeyValue, sessionId: string): Promise<Record<string, CodemodeJson>> {
   const entry = await kv.get(PREFIX + sessionId)
   return isEntry(entry) ? entry.values : {}
 }
 
-export async function saveSessionStore(kv: KeyValue, sessionId: string, values: Record<string, CodemodeJson>): Promise<void> {
-  const key = PREFIX + sessionId
-  if (Object.keys(values).length === 0) await kv.delete(key)
-  else await kv.set(key, { savedAt: Date.now(), values } satisfies Entry)
-  await prune(kv, key)
+/**
+ * Applies a script's changes onto the session's values as saved now, not as the script found them, so
+ * scripts running side by side keep each other's keys.
+ */
+export async function saveSessionStore(kv: KeyValue, sessionId: string, changes: StoreChanges): Promise<void> {
+  const save = (saving.get(sessionId) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    const key = PREFIX + sessionId
+    const values = await loadSessionStore(kv, sessionId)
+    for (const [name, value] of changes) {
+      if (value === undefined) delete values[name]
+      else values[name] = value
+    }
+    if (Object.keys(values).length === 0) await kv.delete(key)
+    else await kv.set(key, { savedAt: Date.now(), values } satisfies Entry)
+    await prune(kv, key)
+  })
+  saving.set(sessionId, save)
+  try {
+    await save
+  } finally {
+    if (saving.get(sessionId) === save) saving.delete(sessionId)
+  }
 }
 
 /** Drops the least recently saved sessions past MAX_SESSIONS or MAX_TOTAL_CHARS, never `keep`. */
