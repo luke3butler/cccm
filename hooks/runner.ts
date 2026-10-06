@@ -50,6 +50,8 @@ const OUTLINE_CHARS = 600
 const OUTLINES_CHARS = 3000
 /** How long a failed script's result waits for the tool calls still running, so it can say how they ended. */
 const LATE_CALLS_MS = 5_000
+/** Fields of a tool call Claude Code reads itself, which a script may not set. */
+const RESERVED_ARGS = ['consent', 'tool_use_id', 'agentId']
 /** The API's limit for one image, as base64. */
 const MAX_IMAGE_CHARS = 5 * 1024 * 1024
 /** Of the hook's 10 s of its own time, what a script may not eat into, so the result still gets written. */
@@ -328,6 +330,11 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
       throw new TypeError(`tools.${identifierOf(tool.name)}() takes one object of arguments.`)
     }
     const plain = args === undefined ? {} : (JSON.parse(JSON.stringify(args)) as Record<string, unknown>)
+    // Claude Code reads these beside a call's arguments (consent as the person's words) and never passes them on.
+    const reserved = RESERVED_ARGS.find(key => Object.hasOwn(plain, key))
+    if (reserved !== undefined) {
+      throw new TypeError(`tools.${identifierOf(tool.name)}(): ${reserved} is reserved by Claude Code and never reaches the tool; a script can't pass it.`)
+    }
     calls += 1
     const call = calls
     // An MCP reply's data, outlined in the call list should the script fail.

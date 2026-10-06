@@ -59,7 +59,7 @@ A first line `// @options: {"max_output_tokens": 2000, "timeout_ms": 60000}` set
 
 | Global | What it gives |
 |---|---|
-| `tools.<name>(args)` | Calls any tool Claude Code can call, MCP tools included, through the same permission checks and hooks as a direct call. Characters that aren't valid in an identifier become `_`. A hyphenated name written as is (`tools.mcp__tl-dv__list-meetings(...)`, which JavaScript reads as a subtraction) is joined back into the tool's name before the script runs |
+| `tools.<name>(args)` | Calls any tool Claude Code can call, MCP tools included, through the same permission checks and hooks as a direct call. Characters that aren't valid in an identifier become `_`. A hyphenated name written as is (`tools.mcp__tl-dv__list-meetings(...)`, which JavaScript reads as a subtraction) is joined back into the tool's name before the script runs. The fields Claude Code reads beside a call's arguments (`consent`, `tool_use_id`, `agentId`) are refused: a script can't speak for you or name the call |
 | `ALL_TOOLS` | Every callable tool as `{ name, call, description }`, `call` being how a script writes it (`tools.mcp__tl_dv__list_meetings`) |
 | `session` | `{ id, cwd, projectDir, repo, turns }`, read once per run. `repo` is `{ root, remote }`, or `null` outside a git repository; `turns` is how many prompts the person has sent |
 | `session.usage({ breakdown?, columns? })` | `$.session.usage` as the engine answers it: `{ startedAt, context, rateLimits, cost }`. `breakdown: "full"` sends a token-count request per tool and memory file, as /context does; `"summary"` estimates locally |
