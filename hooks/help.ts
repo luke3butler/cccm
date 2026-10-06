@@ -12,6 +12,7 @@ export type HelpLimits = {
   maxModelCalls: number
   maxImages: number
   defaultMaxOutputTokens: number
+  maxOutputTokens: number
 }
 
 type Topic = { summary: string; text: (limits: HelpLimits) => string }
@@ -24,15 +25,23 @@ const TOPICS: Record<string, Topic> = {
 Records beyond { text, result }:
 - Bash: result.stdout, result.stderr, result.interrupted.
 - Read: text has line numbers, result.file.content does not. Pass an image file's result to image().
-- MCP: prefer structuredContent when the server sends it, else parse text; look at text.slice(0, 300) before parsing an unfamiliar tool's reply. A rejected MCP call's error.result holds the whole reply.
-- fullOutputPath: the file Claude Code saved a long output to.
+- MCP: json is structuredContent when the server sends one, else text parsed when it is a JSON object or array; without it, read text. A rejected MCP call's error.result holds the whole reply.
+- fullOutputPath: the file Claude Code saved a long output to; readFile(fullOutputPath) reads it back in a later script.
 - Grep and Glob are not in every session; Bash with rg or find always is.
+
+Before a long script, learn unfamiliar tools' replies in one short script, all at once:
+  const [hits, items] = await Promise.all([tools.mcp__x__search({ q: "fox" }), tools.mcp__y__list({})])
+  return [shape(hits.json), shape(items.json)]
+A reply that cost money or changed something is worth keeping rather than calling for again:
+  store("hits", hits.json)                              // small; load("hits") in a later script
+  await writeFile("<scratchpad>/hits.json", hits.json)  // large; JSON.parse(await readFile(...)) later
+If a script fails, its result outlines each MCP reply it got and saves it; the retry reads it with readFile(path) rather than calling again.
 
 Keep the calls that succeed:
   const settled = await Promise.allSettled(files.map(f => tools.Read({ file_path: f })))
   const read = settled.filter(r => r.status === "fulfilled").map(r => r.value.result.file.content)
 
-Finding tools: searchTools("calendar events", { limit: 5, namespace: "google" }), describeNamespace("tldv"), and describeTool(name).declaration before calling an MCP tool whose arguments you have not seen.
+Finding tools: searchTools("calendar events", { limit: 5, namespace: "google" }) or describeNamespace("tldv") gives each tool's call and signature; describeTool(name).declaration when you need what an argument means.
 
 A command longer than a script should wait on (a build, a dev server): run it with Bash run_in_background and end your turn. Its notification starts your next one, and a pane can show its output live (help("panes")).`,
   },
@@ -42,18 +51,27 @@ A command longer than a script should wait on (a build, a dev server): run it wi
 
 - A top-level return of an object shows as pretty JSON.
 - image(value) takes a data: URL, an image block ({ type: "image", data, mimeType }) or what tools.Read resolves to for an image file: PNG, JPEG, GIF or WebP, 5 MB of base64 each, ${limits.maxImages} per script. Never text() image data.
-- Output past max_output_tokens (default ${limits.defaultMaxOutputTokens}) keeps its start and end; the result names the file holding all of it.
-- Calls still running when the script ends finish, but their results are lost. A script awaiting a promise nothing can settle fails at once. timeout_ms ends a script mid-call.`,
+- Output past max_output_tokens (default ${limits.defaultMaxOutputTokens}, at most ${limits.maxOutputTokens}, the most Claude Code shows whole) keeps its start and end; the result names the file holding all of it. The parameter wins over the // @options line.
+- Calls still running when the script ends finish unseen, except that a failed script's result waits up to 5 s for its tool calls and says how they ended. A script awaiting a promise nothing can settle fails at once. timeout_ms ends a script mid-call.`,
   },
   models: {
     summary: 'defaults, limits and a worked example of models.complete and models.classify',
     text: limits => `# models
 
-complete: no tools or history; model defaults to "${limits.defaultModel}", maxTokens to 1024; rejects when no reply came. classify: 2 or more labels; undefined when the model named none. At most ${limits.maxConcurrentModelCalls} calls run at once (the rest queue), ${limits.maxModelCalls} per script.
+complete: no tools or history; model defaults to "${limits.defaultModel}", maxTokens to 1024; rejects when no reply came. classify(text, labels, { model? }): 2 or more labels; one model call per text; undefined when the model named none. At most ${limits.maxConcurrentModelCalls} calls run at once (the rest queue), ${limits.maxModelCalls} per script.
 
-Return only what matters from many items:
+Return only what matters from a few items:
   const labels = await Promise.all(issues.map(i => models.classify(i.title + "\\n" + i.body, ["bug", "feature", "question"])))
-  return issues.filter((_, n) => labels[n] === "bug").map(i => i.title)`,
+  return issues.filter((_, n) => labels[n] === "bug").map(i => i.title)
+
+Many items: label a batch in one complete call. It is faster and cheaper than a classify each, and labels like items alike:
+  const batches = []
+  for (let n = 0; n < issues.length; n += 50) batches.push(issues.slice(n, n + 50))
+  const replies = await Promise.all(batches.map(batch => models.complete({
+    model: "sonnet", maxTokens: 4096,
+    prompt: 'Label each issue bug, feature or question. Reply with only JSON: {"<id>": "<label>"}.\\n\\n' + batch.map(i => i.id + ": " + i.title).join("\\n"),
+  })))
+  const labels = Object.assign({}, ...replies.map(r => JSON.parse(r.text.slice(r.text.indexOf("{"), r.text.lastIndexOf("}") + 1))))`,
   },
   panes: {
     summary: 'elements, charts, images, hover, showing by state, binding, code a pane runs (render, on, every), asking the person, following background tasks, layout',

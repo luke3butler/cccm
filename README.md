@@ -50,30 +50,32 @@ bun scripts/smoke.ts
 | `script` | one of `script` and `name` | Raw JavaScript, run as the body of an async function: top-level `await` and `return` work |
 | `name` | | A [saved script](#saved-scripts) to run in place of `script` |
 | `args` | `{}` | The saved script's args, which it reads as the `args` global |
-| `max_output_tokens` | 10000 | Output past it keeps its start and end, and the full text goes to a temp file |
+| `max_output_tokens` | 10000 | Output past it keeps its start and end, and the full text goes to a temp file. At most 12000: Claude Code saves a result past about 50,000 characters to a file and shows only a preview, so a higher value is lowered, and the result says so when it matters |
 | `timeout_ms` | unset | A wall-clock deadline for the whole script, tool calls included |
 
-A first line `// @options: {"max_output_tokens": 2000, "timeout_ms": 60000}` sets the same options from inside the script.
+A first line `// @options: {"max_output_tokens": 2000, "timeout_ms": 60000}` sets the same options from inside the script; a parameter of the same name wins.
 
 ### Globals
 
 | Global | What it gives |
 |---|---|
-| `tools.<name>(args)` | Calls any tool Claude Code can call, MCP tools included, through the same permission checks and hooks as a direct call. Characters that aren't valid in an identifier become `_` |
-| `ALL_TOOLS` | Every callable tool as `{ name, description }` |
-| `searchTools(query, { limit?, namespace? })` | Tools ranked by relevance (BM25). `limit` defaults to 8; `namespace` is an MCP server name |
-| `describeTool(name)` | `{ name, description, mcp, declaration? }`, the declaration being the tool's input type as TypeScript |
-| `describeNamespace(server)` | `{ name, tools }` for an MCP server, or `undefined` |
+| `tools.<name>(args)` | Calls any tool Claude Code can call, MCP tools included, through the same permission checks and hooks as a direct call. Characters that aren't valid in an identifier become `_`. A hyphenated name written as is (`tools.mcp__tl-dv__list-meetings(...)`, which JavaScript reads as a subtraction) is joined back into the tool's name before the script runs |
+| `ALL_TOOLS` | Every callable tool as `{ name, call, description }`, `call` being how a script writes it (`tools.mcp__tl_dv__list_meetings`) |
+| `searchTools(query, { limit?, namespace? })` | Tools ranked by relevance (BM25) as `{ name, call, description, signature? }`, the signature being the tool's arguments on one line. `limit` defaults to 8; `namespace` is an MCP server name |
+| `describeTool(name)` | `{ name, call, description, mcp, signature?, declaration? }`, the declaration being the tool's input type as TypeScript with its doc comments. Joined onto a string, it reads as the call: `tools.Bash({ command: string; … })` |
+| `describeNamespace(server)` | `{ name, tools }` for an MCP server, each tool as `searchTools` gives it, or `undefined` |
 | `session` | `{ id, cwd, projectDir, repo, turns }`, read once per run. `repo` is `{ root, remote }`, or `null` outside a git repository; `turns` is how many prompts the person has sent |
 | `session.usage({ breakdown?, columns? })` | `$.session.usage` as the engine answers it: `{ startedAt, context, rateLimits, cost }`. `breakdown: "full"` sends a token-count request per tool and memory file, as /context does; `"summary"` estimates locally |
 | `session.messages({ agentId?, as? })` | `$.session.messages` as the engine answers it: the newest 4096 messages as `{ role, text, toolUses, toolResults? }`, or `{ role, content }` with `as: "api"`; with `agentId`, that agent's, or `{ deny }` |
 | `models.complete({ prompt, model?, system?, maxTokens?, effort? })` | One completion through the session's own client, with no tools or history. Resolves `{ text, usage }`; rejects when no reply came |
-| `models.classify(text, labels, { model? })` | The one of `labels` (two or more) a small, fast model picks, or `undefined` |
+| `models.classify(text, labels, { model? })` | The one of `labels` (two or more) a small, fast model picks, or `undefined`; one model call per text. For many items, one `complete` call labelling a batch as JSON is faster, cheaper and more consistent (`help("models")` has the recipe) |
 | `text(value)`, `console.log(...)` | Add to the output: strings as they are, other values as JSON. A top-level `return` adds its value the same way |
 | `image(value)` | Adds an image after the text, from a `data:` URL, an MCP or API image block, or what `tools.Read` resolves to for an image file |
 | `sleep(ms)` | Resolves after `ms` milliseconds |
 | `exit()` | Ends the script successfully |
-| `store(key, value)`, `load(key)` | Small JSON values kept across runs in this session, a resumed one included. Writes are kept only when the script succeeds; `undefined` deletes |
+| `store(key, value)`, `load(key)` | JSON values kept across runs in this session, a resumed one included: up to 256K characters each and 1M in all, so a small reply can be kept for a later script rather than fetched again (`writeFile` a larger one). Writes are kept only when the script succeeds; `undefined` deletes |
+| `shape(value)` | The value's outline as a TypeScript-like type: `{ id: string; tags?: string[] }[]`. An array's items merge into one type, a key some lack marked `?` |
+| `writeFile(path, value)`, `readFile(path)` | `writeFile` is a `tools.Write` call: a string as it is, any other value as JSON; a relative path is from the session's directory; resolves to the path. `readFile` resolves a file's text, up to 4 MiB, past Read's 256 KB limit. A file codemode saved (a long output, a failed script's reply) or Claude Code saved from this session's tool calls is read as it is; any other first goes through a `tools.Read` from past its end, which reads nothing, so Read's rules, hooks and dialog decide |
 | `table(text, { split?, header? })` | Command output in columns (iostat, ps, df, CSV) as rows keyed by its header line, plain numbers as numbers |
 | `ui`, `h()` | Panes beside the transcript; see [Panes](#panes) |
 | `args` | A saved script's args, checked against its `meta`; see [Saved scripts](#saved-scripts) |
@@ -86,8 +88,8 @@ The reference in the `script` parameter's description is in the model's context 
 | Call | Resolves to | On failure |
 |---|---|---|
 | Built-in tool | `{ text, result }`: `text` is what the model would read, `result` the tool's structured record (for Bash: `stdout`, `stderr`, ...; for Read, `file.content` is the raw text) | Rejects with the tool's error text, denied calls included |
-| MCP tool | `{ content, structuredContent, text }` | Rejects with the server's error text, denied calls included; the error's `result` holds the whole reply |
-| Long output | `text` (and Bash's `result.stdout`) hold the whole output, up to 4 MiB; `fullOutputPath` names the saved file | |
+| MCP tool | `{ content, structuredContent, text, json }`, `json` being `structuredContent` when the server sends one, else `text` parsed when it's a JSON object or array | Rejects with the server's error text, denied calls included; the error's `result` holds the whole reply |
+| Long output | `text` (and Bash's `result.stdout`) hold the whole output, up to 4 MiB; `fullOutputPath` names the saved file. An MCP result Claude Code replaced with a notice naming its file is read back from that file, found by where it is (this session's `tool-results` folder), when it was written (during the call) and its size, not by the notice's wording | Rejects when the result looks like such a notice but its file can't be found or read, and logs a line saying so, so a script never takes the notice for data |
 | Read of a file the conversation already holds | The file's text in Read's numbered-line format, not Claude Code's "file unchanged" stub | |
 
 `Promise.allSettled()` keeps the calls that succeed. The `script` parameter's description lists the inputs of the common built-in tools: Bash, Read, Write, Edit, WebFetch and WebSearch, plus Glob and Grep when registered. `describeTool` has declarations for the built-in tools and for MCP tools connected when the plugin last loaded.
@@ -95,7 +97,8 @@ The reference in the `script` parameter's description is in the model's context 
 ### The result
 
 - **Header:** "Script completed" or "Script failed", the run time, then the tool calls, model calls (with tokens, when reported) and images.
-- **A failed script:** keeps its partial output and ends with "Script error:". A runtime error also names the line that ran last ("near line N"). Then come the calls the script made (the latest 20), each ok, failed or left running, so a retry knows what already took effect.
+- **A failed script:** keeps its partial output and ends with "Script error:". A runtime error also names the line that ran last ("near line N"). Then come the calls the script made (the latest 20), each ok, failed or left running, so a retry knows what already took effect. Tool calls still running when the script failed aren't cancelled, so the result waits up to 5 s for them (not after a timeout or an interrupt, and not at all when none is running), and one that ends in time shows how it ended, marked "(ended after the error)". Under each MCP call that succeeded is an outline of its reply (`json: { issues: { key: string }[]; total: number }`, or a note that the text isn't JSON), shown once per tool and outline, so a retry knows the reply's shape without calling the tool again to look. Each of those replies is also saved (its `json`, or its text), its path after the call, for the retry to read with `readFile()` rather than call again: some calls cost money or change things.
+- **Saved outputs:** when Claude Code saved any of the script's tool outputs to files, the result ends with a list of them: the call's number in the script, the tool, its args and the file, so a later script can read one back with `readFile()`, or filter a larger one with `tools.Bash`, without calling the tool again. Past 10, the rest are counted and the whole list, with each call's full args, is saved to a file of one JSON object per line, named in the result.
 - **Plain text:** colours and other escape sequences in the output are removed, and a line a carriage return rewrote (a progress bar) keeps what a terminal would show last. They cost the model tokens and say nothing to it, and Claude Code refuses to draw text that holds them, in the result and in a pane alike.
 
 ### Limits

@@ -1,11 +1,15 @@
 import type { ToolCallArgs, ToolInfo } from 'claude-code'
 import { expect, test, type Engine } from 'claude-code/testing'
 
+declare const setTimeout: (run: () => void, ms: number) => unknown
+
 const TOOLS: ToolInfo[] = [
   { name: 'Read', description: 'Read a file from the local filesystem.', mcp: false },
   { name: 'Bash', description: 'Run a shell command.', mcp: false },
+  { name: 'Write', description: 'Write a file to the local filesystem.', mcp: false },
   { name: 'mcp__dev-radius__search', description: 'Search the radius index for documents.', mcp: true },
   { name: 'mcp__dev-radius__fetch', description: 'Fetch one document by id.', mcp: true },
+  { name: 'mcp__tl-dv__list-meetings', description: 'List meetings.', mcp: true },
   { name: 'mcp__codemode__run', description: 'This tool.', mcp: false },
 ]
 
@@ -104,6 +108,53 @@ test('searchTools ranks by relevance and ALL_TOOLS leaves codemode out', async (
   expect(text).toContain('\n2')
 })
 
+test('a hyphenated tool name calls the tool instead of subtracting', async ($, on) => {
+  stubEngine(on)
+  on('tool.call', { tool: /^mcp__tl-dv__list-meetings$/ }, (_$, e) => {
+    const page = (e as unknown as { page?: number }).page
+    return { result: { content: [{ type: 'text', text: `page ${page}` }] }, text: `page ${page}` }
+  })
+
+  const text = await run(
+    $,
+    `const settled = await Promise.allSettled([1, 2].map(page => tools.mcp__tl-dv__list-meetings({ page })))
+     const third = await tools.mcp__tl-dv__list-meetings({ page: 3 }).then(r => r.text)
+     return [...settled.map(r => r.value.text), third].join(", ")`,
+  )
+
+  expect(text).toContain('Script completed')
+  expect(text).toContain('3 tool calls')
+  expect(text).toContain('page 1, page 2, page 3')
+})
+
+test('a hyphenated name the rewrite cannot join names the tool to write instead', async ($, on) => {
+  stubEngine(on)
+
+  const text = await run($, 'return tools.mcp__tl-dv__list-meetings({}) * 2')
+
+  expect(text).toContain('Script failed')
+  expect(text).toContain('No tool named mcp__tl. A hyphen in a tool name reads as a subtraction; write it as an underscore: tools.mcp__tl_dv__list_meetings')
+})
+
+test('found tools carry how a script writes them, and describeTool joined onto text reads as the call', async ($, on) => {
+  stubEngine(on)
+
+  const text = await run(
+    $,
+    `const out = []
+     for (const n of ["mcp__tl-dv__list-meetings", "Read"]) out.push(n + "\\n" + await describeTool(n))
+     out.push((await searchTools("meetings"))[0].call, (await describeNamespace("tl-dv")).tools[0].call)
+     out.push(ALL_TOOLS.find(t => t.name === "Read").call)
+     return out.join("\\n")`,
+  )
+
+  expect(text).toContain('Script completed')
+  expect(text).not.toContain('[object Object]')
+  expect(text).toContain('mcp__tl-dv__list-meetings\ntools.mcp__tl_dv__list_meetings(')
+  expect(text).toContain('Read\ntools.Read(')
+  expect(text).toContain('tools.mcp__tl_dv__list_meetings\ntools.mcp__tl_dv__list_meetings\ntools.Read')
+})
+
 test('a failed tool call rejects, and allSettled keeps the rest', async ($, on) => {
   stubEngine(on)
   on('tool.call', { tool: 'Read' }, (_$, e) =>
@@ -149,6 +200,26 @@ test('a failing script keeps its partial output', async ($, on) => {
   expect(text).toContain('Script failed')
   expect(text).toContain('before')
   expect(text).toContain('Script error: TypeError')
+})
+
+test('MCP replies carry their JSON parsed, and a failed script outlines each reply it got', async ($, on) => {
+  stubEngine(on)
+  const reply = JSON.stringify({ issues: [{ key: 'X-1' }, { key: 'X-2', assignee: 'me' }], total: 2 })
+  on('tool.call', { tool: /^mcp__dev-radius__search$/ }, () => ({ result: { content: [{ type: 'text', text: reply }] }, text: reply }))
+  on('tool.call', { tool: /^mcp__dev-radius__fetch$/ }, () => ({ result: { content: [{ type: 'text', text: 'plain words' }] }, text: 'plain words' }))
+
+  const parsed = await run($, 'return (await tools.mcp__dev_radius__search({ query: "x" })).json.issues[1].assignee')
+  expect(parsed).toContain('\nme')
+
+  const failed = await run(
+    $,
+    `const [hits] = await Promise.all([tools.mcp__dev_radius__search({ query: "x" }), tools.mcp__dev_radius__fetch({ id: 1 })])
+     return hits.json.data.issues.length`,
+  )
+  expect(failed).toContain('Script failed')
+  expect(failed).toContain('mcp__dev-radius__search  x')
+  expect(failed).toContain('         json: { issues: { key: string; assignee?: string }[]; total: number }')
+  expect(failed).toContain('         text, not JSON (11 chars): "plain words"')
 })
 
 test('unknown tools and syntax errors fail with a useful message', async ($, on) => {
@@ -481,4 +552,203 @@ test('help() lists the topics, and help(topic) holds the detail the reference le
   expect(panes).not.toContain('${')
   expect(await run($, 'return help("Models")')).toContain('# models')
   expect(await run($, 'return help("nope")')).toContain('No help topic "nope". Topics:')
+})
+
+/** Where Claude Code saves an oversized output in the stubbed session, and the payload the stub saves. */
+const SAVED = '/home/me/.claude/projects/-work/test-session/tool-results/mcp-dev-radius-search-1791222696544.txt'
+const PAYLOAD = JSON.stringify({ issues: Array.from({ length: 50 }, (_, i) => ({ key: `CPE-${i}` })) })
+
+/** An MCP search that Claude Code answers with `notice` in place of its output, saved to the files `files`. */
+function stubOverflow(
+  on: TestOn,
+  notice: string,
+  files: Record<string, { text: string; mtimeMs?: number; readError?: string }> = { [SAVED]: { text: PAYLOAD } },
+): void {
+  stubEngine(on)
+  on('tool.call', { tool: /^mcp__dev-radius__search$/ }, () => ({ result: { content: [{ type: 'text', text: notice }] }, text: notice }))
+  on('fs.stat', (_$, e) => {
+    const file = files[(e as { path: string }).path]
+    if (file === undefined) throw new Error('ENOENT')
+    const path = (e as { path: string }).path
+    return { value: { kind: 'file' as const, size: file.text.length, mtimeMs: file.mtimeMs ?? Date.now(), isLink: false, realPath: path } }
+  })
+  on('fs.read', (_$, e) => {
+    const file = files[(e as { path: string }).path]
+    if (file === undefined) throw new Error('ENOENT')
+    // A stub that throws is a failed hook to the harness: the script sees "no implementation", not this text.
+    if (file.readError !== undefined) throw new Error(file.readError)
+    return { value: file.text }
+  })
+}
+
+/** Claude Code's notice as it reads today. */
+const NOTICE = `Error: result (${PAYLOAD.length.toLocaleString('en-US')} characters) exceeds maximum allowed tokens. Output has been saved to ${SAVED}.\nFormat: JSON with schema: {issues: {nodes: [...]}}\n- For targeted queries (find a value, filter by field): use jq on the file directly.`
+
+test('an MCP result Claude Code saved to a file reaches the script whole, and is listed', async ($, on) => {
+  stubOverflow(on, NOTICE)
+
+  const text = await run($, 'const r = await tools.mcp__dev_radius__search({ query: "x" })\nreturn [JSON.parse(r.text).issues.length, r.content[0].text === r.text, r.fullOutputPath]')
+
+  expect(text).toContain('Script completed')
+  expect(text).toContain(`50,\n  true,\n  "${SAVED}"`)
+  expect(text).toContain(`Saved outputs (readFile(path) in a script reads one back, up to 4 MiB; tools.Bash with jq or rg filters a larger one):\n- #1 mcp__dev-radius__search  x → ${SAVED} (${PAYLOAD.length.toLocaleString('en-US')} chars)`)
+})
+
+test('the file is found by where it is, so a reworded notice is still recovered', async ($, on) => {
+  stubOverflow(on, `Too big for the context; stored at ${SAVED}`)
+
+  const text = await run($, 'const r = await tools.mcp__dev_radius__search({ query: "x" })\nreturn JSON.parse(r.text).issues.length')
+
+  expect(text).toContain('Script completed')
+  expect(text).toContain('\n50')
+})
+
+test('an MCP overflow whose file does not hold what the notice says rejects', async ($, on) => {
+  stubOverflow(on, NOTICE, { [SAVED]: { text: `${PAYLOAD} and more` } })
+
+  const text = await run($, 'await tools.mcp__dev_radius__search({ query: "x" })')
+
+  expect(text).toContain('Script failed')
+  expect(text).toContain('but the file holds')
+})
+
+test('an MCP overflow whose file is found but cannot be read back rejects, naming the file', async ($, on) => {
+  stubOverflow(on, NOTICE, { [SAVED]: { text: PAYLOAD, readError: 'over 4 MiB' } })
+
+  const text = await run($, 'await tools.mcp__dev_radius__search({ query: "x" })')
+
+  expect(text).toContain('Script failed')
+  expect(text).toContain(`was saved to ${SAVED}, which could not be read back`)
+  expect(text).toContain('Filter it with tools.Bash (jq, rg).')
+})
+
+test('a failed script saves its MCP replies for readFile; writeFile and readFile of other files go through Write and Read', async ($, on) => {
+  const written = new Map<string, string>()
+  const files = (): Record<string, { text: string } | undefined> => ({
+    [SAVED]: { text: PAYLOAD },
+    '/work/notes.txt': { text: '{"private":1}' },
+    '/work/secret.txt': { text: 'secret' },
+    ...Object.fromEntries([...written].map(([path, text]) => [path, { text }])),
+  })
+  stubEngine(on)
+  on('env.get', () => ({ value: '/tmp/' }))
+  on('fs.write', (_$, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('fs.stat', (_$, e) => {
+    const file = files()[e.path]
+    const isFolder = e.path === '/tmp/claude-codemode'
+    if (file === undefined && !isFolder) throw new Error('ENOENT')
+    return { value: { kind: isFolder ? ('dir' as const) : ('file' as const), size: file?.text.length ?? 0, mtimeMs: Date.now(), isLink: false, realPath: e.path } }
+  })
+  on('fs.read', (_$, e) => ({ value: files()[e.path]!.text }))
+  const reads: unknown[] = []
+  on('tool.call', { tool: 'Read' }, (_$, e) => {
+    reads.push({ ...e })
+    return e.file_path === '/work/secret.txt' ? { deny: 'Permission to read /work/secret.txt has been denied.' } : { result: {}, text: '1\tfirst line' }
+  })
+  on('tool.call', { tool: 'Write' }, (_$, e) => {
+    written.set(String(e.file_path), String(e.content))
+    return { result: { type: 'create' }, text: `File created successfully at: ${e.file_path}` }
+  })
+  const reply = JSON.stringify({ issues: [{ key: 'X-1' }] })
+  on('tool.call', { tool: /^mcp__dev-radius__fetch$/ }, () => ({ result: { content: [{ type: 'text', text: reply }] }, text: reply }))
+
+  const failed = await run($, 'const r = await tools.mcp__dev_radius__fetch({ id: 1 })\nreturn r.json.data.issues')
+  expect(failed).toContain("TypeError: Cannot read properties of undefined (reading 'issues'): r.json.data is undefined (near line 2)")
+  const path = /mcp__dev-radius__fetch {2}\{"id":1\} {2}\d+ ms {2}→ (\S+)/.exec(failed)?.[1]
+  expect(path).toMatch(/^\/tmp\/claude-codemode\/[\w$]+-reply-1\.txt$/)
+  expect(failed).toContain('Replies marked → are saved, each one\'s json as JSON (else its text): a retry reads them with JSON.parse(await readFile(path)) rather than calling again.')
+
+  const retried = await run($, `return JSON.parse(await readFile(${JSON.stringify(path)})).issues[0].key + " " + JSON.parse(await readFile(${JSON.stringify(SAVED)})).issues.length`)
+  expect(retried).toContain('Script completed')
+  expect(retried).toContain('0 tool calls')
+  expect(retried).toContain('X-1 50')
+  expect(reads).toEqual([])
+
+  const other = await run($, 'return await readFile("/work/notes.txt")')
+  expect(other).toContain('1 tool call\n{"private":1}')
+  expect(reads).toEqual([expect.objectContaining({ file_path: '/work/notes.txt', offset: Number.MAX_SAFE_INTEGER, limit: 1 })])
+
+  const refused = await run($, 'await readFile("/work/secret.txt")')
+  expect(refused).toContain('Permission to read /work/secret.txt has been denied.')
+
+  const roundTrip = await run($, 'const p = await writeFile("out/hits.json", { hits: [1, 2] })\nreturn p + " " + JSON.parse(await readFile(p)).hits.length')
+  expect(roundTrip).toContain('/work/sub/out/hits.json 2')
+  expect(written.get('/work/sub/out/hits.json')).toBe('{"hits":[1,2]}')
+})
+
+test('a failed script waits for its tool calls still running, and reports how they ended', async ($, on) => {
+  stubEngine(on)
+  // The wait sleeps in short processes; answer each after a moment, as `sleep` would.
+  on('process.run', async () => {
+    await new Promise(resolve => setTimeout(() => resolve(undefined), 10))
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('tool.call', { tool: /^mcp__dev-radius__fetch$/ }, async () => {
+    await new Promise(resolve => setTimeout(() => resolve(undefined), 100))
+    return { result: { content: [{ type: 'text', text: '{"id":"X-1"}' }] }, text: '{"id":"X-1"}' }
+  })
+
+  const text = await run($, 'tools.mcp__dev_radius__fetch({ id: 1 })\nthrow new Error("boom")')
+
+  expect(text).toContain('Script error: Error: boom (near line 2)')
+  expect(text).toMatch(/ok {5}mcp__dev-radius__fetch {2}\{"id":1\} {2}\d+ ms {2}\(ended after the error\)/)
+  expect(text).toContain('json: { id: string }')
+})
+
+test('an MCP overflow whose file cannot be found rejects and tells the person', async ($, on) => {
+  stubOverflow(on, NOTICE, {})
+  const logged: string[] = []
+  on('ui.log', (_$, e) => {
+    logged.push(String((e as { text: string }).text))
+    return { value: undefined }
+  })
+
+  const text = await run($, 'await tools.mcp__dev_radius__search({ query: "x" })')
+
+  expect(text).toContain('Script failed')
+  expect(text).toContain('could not find')
+  expect(logged.join('\n')).toContain('could not be recovered')
+})
+
+test('a file an earlier call saved is not taken for the output, and the notice naming it rejects', async ($, on) => {
+  stubOverflow(on, NOTICE, { [SAVED]: { text: PAYLOAD, mtimeMs: 0 } })
+
+  const text = await run($, 'await tools.mcp__dev_radius__search({ query: "x" })')
+
+  expect(text).toContain('Script failed')
+  expect(text).toContain('could not find')
+})
+
+test('a result naming a large file outside tool-results is an ordinary result', async ($, on) => {
+  stubOverflow(on, 'See /home/me/notes/big.txt for details.', { '/home/me/notes/big.txt': { text: PAYLOAD } })
+
+  const text = await run($, 'const r = await tools.mcp__dev_radius__search({ query: "x" })\nreturn [r.text, r.fullOutputPath ?? "none"]')
+
+  expect(text).toContain('Script completed')
+  expect(text).toContain('"See /home/me/notes/big.txt for details.",\n  "none"')
+  expect(text).not.toContain('Saved outputs')
+})
+
+test('past ten saved outputs, the result counts the rest and saves the whole list', async ($, on) => {
+  stubOverflow(on, NOTICE)
+  const written: Record<string, string> = {}
+  on('env.get', () => ({ value: '/tmp' }))
+  on('fs.write', (_$, e) => {
+    const { path, text } = e as { path: string; text: string }
+    written[path] = text
+    return { value: undefined }
+  })
+
+  const text = await run($, 'await Promise.all(Array.from({ length: 12 }, (_, i) => tools.mcp__dev_radius__search({ query: `q${i}` })))')
+
+  const listed = text.split('\n').filter(line => / mcp__dev-radius__search  q\d+ → /.test(line))
+  expect(listed).toHaveLength(10)
+  expect(listed[2]).toStartWith('- #3 mcp__dev-radius__search  q2 → ')
+  expect(text).toContain('- … 2 more; the full list (one JSON object per line) is in /tmp/claude-codemode/')
+  const manifest = Object.entries(written).find(([path]) => path.endsWith('-saved-outputs.txt'))?.[1] ?? ''
+  expect(manifest.split('\n')).toHaveLength(12)
+  expect(JSON.parse(manifest.split('\n')[11]!)).toEqual({ call: 12, tool: 'mcp__dev-radius__search', args: { query: 'q11' }, path: SAVED, chars: PAYLOAD.length })
 })

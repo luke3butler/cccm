@@ -1,4 +1,23 @@
-// sval 0.6.12 (MIT, https://github.com/Siubaak/sval), vendored. Edits: the method `import` (which adds globals) is renamed `importModule`, and one parser message is reworded (a hooks module may not hold a dynamic-import call); untagged template literals evaluate to their cooked text, not the raw text (upstream turned `\n` into a backslash and an n).
+// sval 0.6.12 (MIT, https://github.com/Siubaak/sval), vendored. Edits: the method `import` (which adds globals) is renamed `importModule`, and one parser message is reworded (a hooks module may not hold a dynamic-import call); untagged template literals evaluate to their cooked text, not the raw text (upstream turned `\n` into a backslash and an n); reading or setting a property of undefined or null names the property and the expression (upstream said only "undefined is not an object (evaluating 'a[n]')").
+/** Codemode's edit: the error for reading or setting a property of undefined or null, naming both. */
+function codemodeNullProperty(e, a, n, what) {
+  const name = typeof n === "symbol" ? n.toString() : String(n), source = codemodeSource(e.object);
+  throw new TypeError(`Cannot ${what} properties of ${a} (${what === "read" ? "reading" : "setting"} '${name}')${source ? `: ${source} is ${a}` : ""}`);
+}
+/** An expression's text when it is a plain chain (`j.json.data`, `rows[0]`, `f(…).x`), else undefined. */
+function codemodeSource(e) {
+  if (e.type === "Identifier") return e.name;
+  if (e.type === "ThisExpression") return "this";
+  if (e.type === "ChainExpression") return codemodeSource(e.expression);
+  if (e.type === "CallExpression") { const c = codemodeSource(e.callee); return c && `${c}${e.optional ? "?." : ""}(…)`; }
+  if (e.type !== "MemberExpression") return undefined;
+  const o = codemodeSource(e.object);
+  if (!o) return undefined;
+  if (!e.computed) return `${o}${e.optional ? "?." : "."}${e.property.name}`;
+  if (e.property.type === "Literal") return `${o}${e.optional ? "?." : ""}[${JSON.stringify(e.property.value)}]`;
+  const k = codemodeSource(e.property);
+  return k && `${o}${e.optional ? "?." : ""}[${k}]`;
+}
 const Er = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   get BlockStatement() {
@@ -4056,9 +4075,12 @@ function* qe(e, t, r = {}) {
     if (e.object.type === "Super" && l) {
       const c = t.find("this").get(), f = B(n);
       return w(c, f, { set: l }), new me(c, f);
-    } else
+    } else {
+      if (a == null) codemodeNullProperty(e, a, n, "set");
       return new me(a, n);
+    }
   } else {
+    if (a == null && !e.optional) codemodeNullProperty(e, a, n, "read");
     const l = Xt(a, n);
     if (e.object.type === "Super" && l) {
       const c = t.find("this").get();
@@ -4095,8 +4117,10 @@ function* Rs(e, t) {
     if (u && (l = l[R]), e.callee.object.type === "Super") {
       const c = t.find("this").get();
       r = l[n].bind(c);
-    } else
+    } else {
+      if (l == null) codemodeNullProperty(e.callee, l, n, "read");
       r = l[n];
+    }
     if (e.optional && r == null)
       return P;
     if (typeof r != "function") {
@@ -5041,9 +5065,12 @@ function ze(e, t, r = {}) {
     if (e.object.type === "Super" && l) {
       const c = t.find("this").get(), f = B(n);
       return w(c, f, { set: l }), new me(c, f);
-    } else
+    } else {
+      if (a == null) codemodeNullProperty(e, a, n, "set");
       return new me(a, n);
+    }
   } else {
+    if (a == null && !e.optional) codemodeNullProperty(e, a, n, "read");
     const l = Xt(a, n);
     if (e.object.type === "Super" && l) {
       const c = t.find("this").get();
@@ -5080,8 +5107,10 @@ function wa(e, t) {
     if (u && (l = l[R]), e.callee.object.type === "Super") {
       const c = t.find("this").get();
       r = l[n].bind(c);
-    } else
+    } else {
+      if (l == null) codemodeNullProperty(e.callee, l, n, "read");
       r = l[n];
+    }
     if (e.optional && r == null)
       return P;
     if (typeof r != "function") {

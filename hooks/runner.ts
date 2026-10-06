@@ -8,15 +8,19 @@ import { addDiffs, fileDiffsOf } from './diffs'
 import { helpText, type HelpLimits } from './help'
 import { h, paneGlobals, taskFileOf, type PaneHost } from './panes'
 import { namespaceOf, normalizeNamespace, rankTools, type ToolEntry } from './search'
+import { shape } from './shape'
 import { table } from './table'
 import { plainText } from './text'
-import { AT, TICK, guard, keepSources } from './guard'
+import { compactDeclaration } from './declarations'
+import { AT, TICK, guard, joinToolNames, keepSources } from './guard'
 import Sval from './vendor/sval.js'
 
 export const TOOL_NAME = 'run'
 export const TOOL_ID = 'mcp__codemode__run'
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000
+/** The most max_output_tokens gives: Claude Code saves a result past about 50,000 characters to a file and shows a preview. */
+const MAX_OUTPUT_TOKENS = 12_000
 const CHARS_PER_TOKEN = 4
 const MAX_STORED_VALUE_CHARS = 262_144
 const MAX_STORED_TOTAL_CHARS = 1_048_576
@@ -32,6 +36,7 @@ const HELP_LIMITS: HelpLimits = {
   maxModelCalls: MAX_MODEL_CALLS,
   maxImages: MAX_IMAGES,
   defaultMaxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+  maxOutputTokens: MAX_OUTPUT_TOKENS,
 }
 const EFFORTS: readonly ModelEffort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 /** How many of a script's latest calls its row shows, and how much of each one's arguments. */
@@ -39,11 +44,26 @@ const RECENT_CALLS = 8
 const CALL_ARGS_CHARS = 120
 /** How many of a failed script's calls its result lists, the latest first kept. */
 const FAILURE_CALLS = 20
+/** The most readFile() reads: the engine's read limit. */
+const READ_FILE_BYTES = 4 * 1024 * 1024
+/** A failed script's call list outlines each MCP reply in at most this many characters, and all of them in this many. */
+const OUTLINE_CHARS = 600
+const OUTLINES_CHARS = 3000
+/** How long a failed script's result waits for the tool calls still running, so it can say how they ended. */
+const LATE_CALLS_MS = 5_000
 /** The API's limit for one image, as base64. */
 const MAX_IMAGE_CHARS = 5 * 1024 * 1024
 /** Of the hook's 10 s of its own time, what a script may not eat into, so the result still gets written. */
 const CPU_RESERVE_MS = 1_500
 const MAIN = '__codemode_main'
+/** How many saved outputs the result lists, the earliest first. */
+const SAVED_OUTPUTS = 10
+/** How far into an MCP result to look for the path of the file its full output was saved to. */
+const OVERFLOW_HEAD_CHARS = 4000
+/** How far into an MCP result to look for signs of an overflow that could not be recovered. */
+const OVERFLOW_SIGN_CHARS = 500
+/** Slack for a filesystem's timestamps when telling a file this call saved from an earlier one. */
+const MTIME_SLACK_MS = 1000
 
 /** The tool description: Claude Code cuts an MCP tool's description at 2048 characters, so the reference is in SCRIPT_HELP. */
 export const DESCRIPTION = `Run a JavaScript script that calls Claude Code's tools, MCP tools included, and get back only what the script outputs. Use it to run tool calls in parallel, chain them, and filter or aggregate large results before you read them, so they never fill your context.
@@ -55,23 +75,25 @@ Read the script parameter's description before your first script: it lists the g
 A script worth keeping can be saved and run again by name, with args: the name parameter lists the saved ones. Run one in place of writing it again.`
 
 /** The reference a script is written against, in the `script` parameter's description. */
-export const SCRIPT_HELP = `JavaScript source. A first line // @options: {"max_output_tokens": 2000, "timeout_ms": 60000} sets the options.
+export const SCRIPT_HELP = `JavaScript source. A first line // @options: {"max_output_tokens": 2000, "timeout_ms": 60000} sets the options; a parameter of the same name wins.
 
 return help("panes") reads a topic's detail and examples; help() lists the topics. Read a topic before you first use what it covers.
 
 Globals:
-- tools.<name>(args): call a tool with one object of arguments (mcp__dev-radius__search is tools.mcp__dev_radius__search), through the same permission checks and hooks as your own calls. Built-in tools resolve to { text, result }: text is what you would read, result the tool's structured record (Bash: stdout, stderr; Read: result.file.content, the raw text). Bash rejects on a non-zero exit, the output in the error; end a command with "|| true" to read a failing one's output. MCP tools resolve to { content, structuredContent, text }. A failed or denied call rejects with the tool's error text; Promise.allSettled() keeps the calls that succeed. An output Claude Code would show you as a preview is whole in text, up to 4 MiB. help("tools")
-- ALL_TOOLS, searchTools(query, { limit?, namespace? }), describeNamespace(server), describeTool(name): find tools and their arguments (describeTool's declaration is the input type as TypeScript). Most MCP tools are not in your own tool list.
+- tools.<name>(args): call a tool with one object of arguments (hyphens become underscores: mcp__tldv__list-meetings is tools.mcp__tldv__list_meetings), through the same permission checks and hooks as your own calls. Built-in tools resolve to { text, result }: text is what you would read, result the tool's structured record (Bash: stdout, stderr; Read: result.file.content, the raw text). Bash rejects on a non-zero exit, the output in the error; end a command with "|| true" to read a failing one's output. MCP tools resolve to { content, structuredContent, text, json }, json being structuredContent or text parsed as JSON. A failed or denied call rejects with the tool's error text; Promise.allSettled() keeps the calls that succeed. An output Claude Code would show you as a preview is whole in text, up to 4 MiB. help("tools")
+- ALL_TOOLS lists every tool as { name, call, description }; searchTools(query, { limit?, namespace? }) and describeNamespace(server) find tools as { name, call, description, signature? }: call is how a script writes the tool, signature its arguments on one line. describeTool(name) adds mcp and declaration, the arguments with doc comments. Most MCP tools are not in your own tool list.
 - session: { id, cwd, projectDir, repo, turns (prompts sent) }. session.usage({ breakdown? }) resolves { startedAt, context, rateLimits, cost }; breakdown "full" sends a token-count request per tool, "summary" doesn't. session.messages({ agentId?, as?: "api" }) resolves the transcript as { role, text, toolUses, toolResults? } rows.
+- shape(value): its outline as a type, { id: string; tags?: string[] }[]. Before a long script, learn an unfamiliar tool's reply in a short one that returns shape(r.json); calling a free read again is fine. Keep a reply that cost money or changed something rather than calling again: store() a small one, or writeFile() a large one to your scratchpad.
+- writeFile(path, value) (a tools.Write; non-strings as JSON) / readFile(path): text up to 4 MiB, through Read's permissions, past its 256 KB limit. A failed script's result outlines and saves each MCP reply it got, for readFile.
 - text(value), console.log(...) and a top-level return make the output; image(value) adds an image; exit() ends the script successfully. help("output")
 - sleep(ms).
-- models.complete({ prompt, model?, system?, maxTokens?, effort? }) resolves { text, usage }; models.classify(text, labels) resolves one of labels or undefined. They cost tokens: use them over many items whose raw text would fill your context. help("models")
+- models.complete({ prompt, model?, system?, maxTokens?, effort? }) resolves { text, usage }; models.classify(text, labels, { model? }) resolves one of labels or undefined. They cost tokens: use them over many items whose raw text would fill your context. help("models")
 - table(text or lines): command output in columns (iostat, ps, df) as rows keyed by its header, numbers as numbers.
 - args: a saved script's args (the name parameter); help("saved") says how to save a script.
-- store(key, value) / load(key): small JSON values across scripts in this session, kept only when the script succeeds; store(key, undefined) deletes.
+- store(key, value) / load(key): JSON values across scripts in this session (256K characters each, 1M in all), kept only when the script succeeds; store(key, undefined) deletes.
 - ui and h(): panes beside the transcript that outlive the script; later scripts change them by id. ui.open({ id, title, ask?, view: h(...) }), ui.update, ui.set(id, "data.x", value), ui.append(id, "data.log", items), ui.follow(id, outputFile, { to, status }) (a background task's output, live after your turn ends), ui.take(id), ui.panes(), ui.close(id), ui.remove(id). To ask the person something, don't wait for them: open a pane with ask and a push: "wake" button, return, and end your turn. Elements: Box, Text, Button, Input, Select, Markdown, Code, Link, Image, Chart; any takes when: { "values.tab": "logs" }. A pane can carry code: render(state) draws it, on: { name: fn } runs on presses, every: { ms, run } polls slowly. Live data: ui.stream(id, command, { to }) runs a command and follows its output, not every. help("panes") has their props, binding, push routes, follows and layouts; read it before your first pane.
 
-The result starts with "Script completed" or "Script failed", then the output; a failed script keeps its partial output and ends with "Script error:", the line that ran last, and the calls it made. Output past max_output_tokens (default ${DEFAULT_MAX_OUTPUT_TOKENS}) keeps its start and end, and the full text is saved to a file. Tool calls are real: calls made before a failure are not undone. Await every call you start. CPU-heavy work fails after about 8 seconds of interpreter time; time spent waiting on tools does not count.`
+The result starts with "Script completed" or "Script failed", then the output; a failed script keeps its partial output and ends with "Script error:", the line that ran last, and the calls it made. Output past max_output_tokens (default ${DEFAULT_MAX_OUTPUT_TOKENS}, at most ${MAX_OUTPUT_TOKENS}) keeps its start and end, and the full text is saved to a file. Tool calls are real: calls made before a failure are not undone. Await every call you start. CPU-heavy work fails after about 8 seconds of interpreter time; time spent waiting on tools does not count.`
 
 /**
  * The tool's input schema; `reference` is appended to the script parameter's description (the built-in
@@ -90,7 +112,7 @@ export function inputSchema(reference = '', saved = '') {
       max_output_tokens: {
         type: 'integer',
         minimum: 1,
-        description: `Output limit (default ${DEFAULT_MAX_OUTPUT_TOKENS}). Longer output keeps its start and end, and the full text is saved to a file.`,
+        description: `Output limit (default ${DEFAULT_MAX_OUTPUT_TOKENS}, at most ${MAX_OUTPUT_TOKENS}: past that Claude Code would save the result to a file and show a preview). Longer output keeps its start and end, and the full text is saved to a file.`,
       },
       timeout_ms: { type: 'integer', minimum: 1, description: 'Wall-clock deadline for the whole script, tool calls included. Unset by default.' },
     },
@@ -114,6 +136,14 @@ export type Host = {
   saveOutput: (name: string, text: string) => Promise<string | undefined>
   /** Reads a file Claude Code saved a long tool output to; rejects past the read limit. */
   readFile: (path: string) => Promise<string>
+  /** A file's size in bytes, modification time and where it lands past links, or undefined when there is none. */
+  statFile: (path: string) => Promise<{ size: number; mtimeMs: number; realPath?: string } | undefined>
+  /** The folder saveOutput writes to, past links, or undefined when it does not exist yet. */
+  savedFolder: () => Promise<string | undefined>
+  /** Wall-clock milliseconds, the time base of a file's mtimeMs. */
+  now: () => number
+  /** Tells the person something went wrong that the script's result alone would hide. */
+  warn?: (text: string) => void
   /** The tool's input type as TypeScript, when the engine's declarations have it. */
   declarationOf: (tool: ToolInfo) => Promise<string | undefined>
   /** Resolves after `ms`; rejects when `signal` aborts. */
@@ -186,6 +216,13 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
   let modelTokens = 0
   let failedCalls = 0
   const made: CodemodeCall[] = []
+  const savedOutputs: SavedRecord[] = []
+  /** Each tool call still running: a failed script's result waits a moment for them. */
+  const toolCallsRunning = new Set<Promise<unknown>>()
+  /** The rows of tool calls that ended after the script failed. */
+  const lateCalls = new Set<CodemodeCall>()
+  /** Each MCP call's reply, by its row, outlined and saved in a failed script's call list. */
+  const replies = new Map<CodemodeCall, KeptReply>()
   let diffs: CodemodeDiffs = { files: [], more: 0 }
   const showCalls = () =>
     host.showCalls?.({ total: calls, failed: failedCalls, recent: made.slice(-RECENT_CALLS).map(call => ({ ...call })) })
@@ -200,6 +237,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     byName.set(identifierOf(tool.name), tool)
   }
   const entries: ToolEntry[] = listed.map(tool => ({ name: tool.name, description: tool.description }))
+  const callOf = (name: string) => `tools.${identifierOf(name)}`
 
   const [loaded, facts] = await Promise.all([host.loadStore(), host.sessionFacts()])
   const stored: Record<string, CodemodeJson> = { ...loaded }
@@ -212,8 +250,12 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
 
   /** Rejects the run from outside the script: the deadline passed, or the script can never finish. */
   let fail: (error: Error) => void = () => {}
+  let isStopped = false
   const failed = new Promise<never>((_, reject) => {
-    fail = reject
+    fail = error => {
+      isStopped = true
+      reject(error)
+    }
   })
   failed.catch(() => {})
 
@@ -258,6 +300,9 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     }
   }
 
+  /** A script's path, relative ones from the session's working directory, as Read and Write take it. */
+  const absolutePath = (path: string) => (path.startsWith('/') ? path : `${facts.cwd.replace(/\/$/, '')}/${path.replace(/^\.\//, '')}`)
+
   const callTool = async (tool: ToolInfo, args: unknown) => {
     check()
     if (args !== undefined && (typeof args !== 'object' || args === null || Array.isArray(args))) {
@@ -265,11 +310,20 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     }
     const plain = args === undefined ? {} : (JSON.parse(JSON.stringify(args)) as Record<string, unknown>)
     calls += 1
-    return recorded(tool.name, argsPreview(plain), () => runCall(tool, plain), () => false)
+    const call = calls
+    // An MCP reply's data, outlined in the call list should the script fail.
+    const keep = tool.mcp ? (reply: unknown) => ({ call, reply: reply as McpReply }) : undefined
+    const running = recorded(tool.name, argsPreview(plain), () => runCall(tool, plain, call), () => false, keep)
+    toolCallsRunning.add(running)
+    running.then(
+      () => toolCallsRunning.delete(running),
+      () => toolCallsRunning.delete(running),
+    )
+    return running
   }
 
   /** Runs one nested call as a row of the script's: running, then ok or error, with its time. */
-  const recorded = async <T>(name: string, args: string, work: () => Promise<T>, isError: (value: T) => boolean): Promise<T> => {
+  const recorded = async <T>(name: string, args: string, work: () => Promise<T>, isError: (value: T) => boolean, keep?: (value: T) => KeptReply): Promise<T> => {
     const call: CodemodeCall = { tool: name, args, status: 'running' }
     made.push(call)
     showCalls()
@@ -284,6 +338,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     try {
       const value = await work()
       settle(isError(value))
+      if (keep !== undefined) replies.set(call, keep(value))
       return value
     } catch (thrown) {
       settle(true)
@@ -328,7 +383,9 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     },
   }
 
-  const runCall = async (tool: ToolInfo, plain: Record<string, unknown>) => {
+  /** Runs one tool call, the script's `call`th, as the script's `tools.<name>()` resolves it. */
+  const runCall = async (tool: ToolInfo, plain: Record<string, unknown>, call: number) => {
+    const startedMs = host.now()
     const ran: ToolCallResult = await track(() => host.callTool({ ...plain, tool: tool.name }))
     if (ran.deny !== undefined) throw new Error(ran.deny)
     if (!ran.isError) diffs = addDiffs(diffs, fileDiffsOf(tool.name, ran.result))
@@ -336,7 +393,9 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     // which a script never saw; the call passed Read's checks, so read the file for it.
     const unchanged = tool.name === 'Read' ? unchangedPath(ran.result) : undefined
     if (unchanged !== undefined) return track(() => reread(host, unchanged, plain))
-    const saved = await track(() => savedOutput(host, ran))
+    let saved = await track(() => savedOutput(host, ran))
+    if (saved === undefined && tool.mcp && !ran.isError) saved = await track(() => overflowOutput(host, tool.name, ran, facts.id, startedMs))
+    if (saved !== undefined) savedOutputs.push({ call, tool: tool.name, args: plain, path: saved.path, chars: saved.text?.length })
     if (tool.mcp) {
       const reply = mcpResult(ran, saved)
       if (ran.isError) throw Object.assign(new Error(reply.text || `${tool.name} failed.`), { result: reply })
@@ -358,6 +417,13 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
       if (key === TOOL_ID || key === TOOL_NAME) throw new Error('A codemode script cannot start another codemode script.')
       const tool = byName.get(key)
       if (tool === undefined) {
+        // tools.a-b(x) the rewrite could not join (tools.a-b(x) * 2) looks up `a`.
+        const hyphenated = listed.filter(tool => identifierOf(tool.name).startsWith(`${key}_`) && tool.name[key.length] === '-')
+        if (hyphenated.length > 0) {
+          const shown = hyphenated.slice(0, 3).map(tool => callOf(tool.name)).join(', ')
+          const more = hyphenated.length > 3 ? ` and ${hyphenated.length - 3} more` : ''
+          throw new ReferenceError(`No tool named ${key}. A hyphen in a tool name reads as a subtraction; write it as an underscore: ${shown}${more}`)
+        }
         throw new ReferenceError(`No tool named ${key}. Find tools with searchTools(), describeNamespace() or ALL_TOOLS.`)
       }
       return (args?: unknown) => callTool(tool, args)
@@ -381,6 +447,12 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     return structuredClone(value)
   }
 
+  /** A found tool as a script sees it: how to write it, and its arguments on one line when declared. */
+  const foundTool = async (entry: ToolEntry) => {
+    const declaration = await track(() => host.declarationOf(byName.get(entry.name)!))
+    return { name: entry.name, call: callOf(entry.name), description: entry.description, ...(declaration ? { signature: compactDeclaration(declaration) } : {}) }
+  }
+
   const print = (...values: unknown[]) => {
     output.push(values.map(formatValue).join(' '))
   }
@@ -393,14 +465,24 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     tools,
     session: { ...structuredClone(facts), usage: sessionCall('usage', host.sessionUsage), messages: sessionCall('messages', host.sessionMessages) },
     models,
-    ALL_TOOLS: entries.map(entry => ({ ...entry })),
+    ALL_TOOLS: entries.map(entry => ({ name: entry.name, call: callOf(entry.name), description: entry.description })),
     searchTools: async (query: unknown, options: { limit?: number; namespace?: string } = {}) =>
-      rankTools(entries, String(query ?? ''), options).map(entry => ({ ...entry })),
+      Promise.all(rankTools(entries, String(query ?? ''), options).map(foundTool)),
     describeTool: async (name: unknown) => {
       const tool = byName.get(String(name))
       if (tool === undefined) return undefined
       const declaration = await track(() => host.declarationOf(tool))
-      return { name: tool.name, description: tool.description, mcp: tool.mcp, ...(declaration ? { declaration } : {}) }
+      const signature = declaration === undefined ? undefined : compactDeclaration(declaration)
+      const described = {
+        name: tool.name,
+        call: callOf(tool.name),
+        description: tool.description,
+        mcp: tool.mcp,
+        ...(declaration ? { signature, declaration } : {}),
+      }
+      // Joined onto a string, it reads as the call; printed or returned, as its fields.
+      Object.defineProperty(described, 'toString', { value: () => `${described.call}(${signature ?? '{…}'})`, enumerable: false })
+      return described
     },
     describeNamespace: async (name: unknown) => {
       const wanted = normalizeNamespace(String(name ?? ''))
@@ -409,9 +491,33 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
         return namespace !== undefined && normalizeNamespace(namespace) === wanted
       })
       if (members.length === 0) return undefined
-      return { name: namespaceOf(members[0]!.name), tools: members.map(entry => ({ ...entry })) }
+      return { name: namespaceOf(members[0]!.name), tools: await Promise.all(members.map(foundTool)) }
     },
     text: (value: unknown) => print(value),
+    shape: (value: unknown) => shape(value),
+    writeFile: async (path: unknown, value: unknown) => {
+      if (typeof path !== 'string' || path === '') throw new TypeError('writeFile() takes a file path and what to write.')
+      const content = typeof value === 'string' ? value : JSON.stringify(value)
+      if (content === undefined) throw new TypeError('writeFile() writes a string, or a JSON value as JSON.')
+      const write = byName.get('Write')
+      if (write === undefined) throw new Error('writeFile(): this session has no Write tool.')
+      const full = absolutePath(path)
+      await callTool(write, { file_path: full, content })
+      return full
+    },
+    readFile: async (path: unknown) => {
+      check()
+      if (typeof path !== 'string' || path === '') throw new TypeError('readFile() takes a file path.')
+      const full = absolutePath(path)
+      const read = byName.get('Read')
+      // Read's own checks (rules, hooks, the dialog or classifier) decide: a Read from past the file's end
+      // raises them and reads nothing, where even one line of minified JSON can be over Read's token limit.
+      const askRead = (real: string) =>
+        read === undefined
+          ? Promise.reject(new Error('readFile(): this session has no Read tool.'))
+          : callTool(read, { file_path: real, offset: Number.MAX_SAFE_INTEGER, limit: 1 })
+      return recorded('readFile', full, () => track(() => readFile(host, full, facts.id, askRead)), () => false)
+    },
     console: { log: print, info: print, warn: print, error: print, debug: print },
     image: (value: unknown) => {
       check()
@@ -434,7 +540,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
         const json = JSON.stringify(value)
         if (json === undefined) throw new TypeError('store() takes a JSON value.')
         if (json.length > MAX_STORED_VALUE_CHARS) {
-          throw new RangeError(`store(): a value may be at most ${MAX_STORED_VALUE_CHARS} characters of JSON.`)
+          throw new RangeError(`store(): a value may be at most ${MAX_STORED_VALUE_CHARS} characters of JSON; writeFile() a larger one (to your scratchpad, say) and readFile() it back.`)
         }
         stored[key] = JSON.parse(json) as CodemodeJson
         if (JSON.stringify(stored).length > MAX_STORED_TOTAL_CHARS) {
@@ -489,6 +595,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     const ast = interpreter.parse(code)
     // A function passed to ui.open (a pane's render or handlers) is kept as its source.
     keepSources(ast, code)
+    joinToolNames(ast, name => byName.has(name))
     guard(ast)
     interpreter.run(ast)
     const main = interpreter.exports[MAIN] as () => Promise<unknown>
@@ -505,6 +612,23 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     stop.abort()
     ctx.signal.removeEventListener('abort', onAbort)
   }
+  // A tool call runs on when the script fails, uncancelled; one that ends soon after is reported as it ended
+  // (and its MCP reply saved), so a retry needn't call it again to learn. Not after a timeout or interrupt.
+  if (error !== undefined && toolCallsRunning.size > 0 && !isStopped && !ctx.signal.aborted && performance.now() < deadline) {
+    // Model calls and sleeps were cancelled with the script; only tool calls are worth the wait.
+    for (const call of made) if (call.status === 'running' && !byName.has(call.tool)) call.status = 'left'
+    const running = made.filter(call => call.status === 'running')
+    const wait = new AbortController()
+    const onInterrupt = () => wait.abort()
+    ctx.signal.addEventListener('abort', onInterrupt, { once: true })
+    await Promise.race([
+      Promise.allSettled(toolCallsRunning),
+      host.sleep(Math.min(LATE_CALLS_MS, deadline - performance.now()), wait.signal),
+    ]).catch(() => {})
+    wait.abort()
+    ctx.signal.removeEventListener('abort', onInterrupt)
+    for (const call of running) if (call.status !== 'running') lateCalls.add(call)
+  }
   if (made.some(call => call.status === 'running')) {
     for (const call of made) if (call.status === 'running') call.status = 'left'
     showCalls()
@@ -515,6 +639,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
   if (diffs.files.length > 0) await host.showDiffs?.(diffs).catch(() => {})
   if (error === undefined && hasStored) await host.saveStore(stored)
 
+  const replyPaths = error === undefined ? undefined : await saveReplies(host, made.slice(-FAILURE_CALLS), replies, identifierOf(ctx.toolUseId))
   const text = await formatResult({
     started,
     calls,
@@ -525,8 +650,13 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     error,
     line,
     made,
+    replies,
+    replyPaths,
+    lateCalls,
+    savedOutputs,
     maxOutputTokens,
     save: text => host.saveOutput(identifierOf(ctx.toolUseId), text),
+    saveManifest: text => host.saveOutput(`${identifierOf(ctx.toolUseId)}-saved-outputs`, text),
   })
   return { text, images }
 }
@@ -625,17 +755,127 @@ async function savedOutput(host: Host, ran: ToolCallResult): Promise<SavedOutput
   }
 }
 
+/** A tool output Claude Code saved to a file, as the result lists it. */
+type SavedRecord = { call: number; tool: string; args: Record<string, unknown>; path: string; chars?: number }
+
+/**
+ * The full output of an MCP call Claude Code found too large: it answers with a notice naming the file
+ * it saved the output to, in place of the output. The file is found by where it is (this session's
+ * tool-results folder), when it was written (during this call) and its size (more than the notice),
+ * not by the notice's wording, so a reworded notice is still recovered.
+ *
+ * Rejects when the result looks like such a notice but its file can't be confirmed or read, so a script
+ * never takes the notice for the tool's data. An MCP tool that legitimately answers a short text naming
+ * this session's tool-results folder (a filesystem server listing it) would be rejected too.
+ */
+async function overflowOutput(host: Host, tool: string, ran: ToolCallResult, sessionId: string, startedMs: number): Promise<SavedOutput | undefined> {
+  const text = ran.text ?? (typeof ran.result === 'string' ? ran.result : '')
+  const folder = `/${sessionId}/tool-results/`
+  const path = await overflowFile(host, text, folder, startedMs)
+  if (path === undefined) {
+    const signs = text.slice(0, OVERFLOW_SIGN_CHARS)
+    if (!signs.includes(folder) && !/exceeds maximum allowed tokens/i.test(signs)) return undefined
+    host.warn?.(`codemode: an oversized ${tool} result could not be recovered; Claude Code's notice may have changed.`)
+    throw new Error(`${tool}: the result was too large and Claude Code saved it to a file codemode could not find. Its notice:\n${text.slice(0, 1000)}`)
+  }
+  let full: string
+  try {
+    full = await host.readFile(path)
+  } catch (thrown) {
+    throw new Error(`${tool}: the result was too large and was saved to ${path}, which could not be read back (${errorText(thrown)}). Filter it with tools.Bash (jq, rg).`)
+  }
+  // The notice states the output's length; when it still does, it must be this file's.
+  const stated = /\(([\d,]+) characters/.exec(text.slice(0, OVERFLOW_SIGN_CHARS))?.[1]
+  if (stated !== undefined && Number(stated.replace(/,/g, '')) !== full.length) {
+    throw new Error(`${tool}: the result was too large and was saved to ${path}, but the file holds ${full.length} characters where the notice said ${stated}.`)
+  }
+  return { path, text: full }
+}
+
+/** The path in `text` of a file this call saved to `folder`, larger than `text`, or undefined. */
+async function overflowFile(host: Host, text: string, folder: string, startedMs: number): Promise<string | undefined> {
+  for (const raw of text.slice(0, OVERFLOW_HEAD_CHARS).match(/\/[^\s"'<>`]+/g) ?? []) {
+    // A path that ends a sentence carries its full stop.
+    const path = raw.replace(/[.,;:)\]]+$/, '')
+    if (!path.includes(folder)) continue
+    const stat = await host.statFile(path)
+    if (stat === undefined || stat.mtimeMs < startedMs - MTIME_SLACK_MS || stat.size <= text.length) continue
+    return path
+  }
+  return undefined
+}
+
 function mcpResult(ran: ToolCallResult, saved: SavedOutput | undefined) {
   const result = (ran.result ?? {}) as { content?: unknown; structuredContent?: unknown }
   const text = saved?.text ?? ran.text ?? ''
   const content =
     Array.isArray(result.content) && saved?.text === undefined ? result.content : [{ type: 'text', text }]
+  const json = result.structuredContent ?? parsedJson(text)
   return {
     content,
     ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}),
     text,
+    ...(json !== undefined ? { json } : {}),
     ...(saved !== undefined ? { fullOutputPath: saved.path } : {}),
   }
+}
+
+type McpReply = ReturnType<typeof mcpResult>
+
+/** `text` parsed, when it is a JSON object or array; undefined otherwise. */
+function parsedJson(text: string): unknown {
+  const start = text.trimStart()[0]
+  if (start !== '{' && start !== '[') return undefined
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+/** An MCP call's reply, and which of the script's tool calls it answered. */
+type KeptReply = { call: number; reply: McpReply }
+
+/**
+ * Saves each reply of the shown calls of a failed script, its json or else its text, so a retry reads it
+ * with readFile() rather than calling again; answers each file by its row.
+ */
+async function saveReplies(host: Host, shown: readonly CodemodeCall[], replies: ReadonlyMap<CodemodeCall, KeptReply>, id: string) {
+  const paths = new Map<CodemodeCall, string>()
+  await Promise.all(
+    shown.map(async row => {
+      const kept = replies.get(row)
+      if (kept === undefined) return
+      const { json, text } = kept.reply
+      const path = await host.saveOutput(`${id}-reply-${kept.call}`, json === undefined ? text : JSON.stringify(json))
+      if (path !== undefined) paths.set(row, path)
+    }),
+  )
+  return paths
+}
+
+/**
+ * A file's text, up to the engine's read limit. A file codemode saved (a long output, a failed script's
+ * reply) or Claude Code saved from this session's tool calls is read as it is; any other goes through
+ * `askRead`, a real Read that reads nothing, so Read's rules, hooks and dialog decide.
+ */
+async function readFile(host: Host, path: string, sessionId: string, askRead: (real: string) => Promise<unknown>): Promise<string> {
+  const [stat, folder] = await Promise.all([host.statFile(path), host.savedFolder()])
+  const real = stat?.realPath
+  if (stat === undefined || real === undefined) throw new Error(`readFile(): no file at ${path}.`)
+  const isCodemodes = folder !== undefined && real.startsWith(`${folder.replace(/\/$/, '')}/`)
+  const isSessions = new RegExp(`/${sessionId.replace(/[^\w-]/g, '')}/tool-results/[^/]+$`).test(real)
+  if (!isCodemodes && !isSessions) await askRead(real)
+  if (stat.size > READ_FILE_BYTES) {
+    throw new Error(`readFile(): ${path} is ${(stat.size / 1024 / 1024).toFixed(1)} MiB, over the 4 MiB it reads; filter it with tools.Bash (jq, rg).`)
+  }
+  return host.readFile(real)
+}
+
+/** An MCP reply's outline, for a failed script's call list. */
+function replyOutline(reply: McpReply): string {
+  if (reply.json !== undefined) return `json: ${shape(reply.json, OUTLINE_CHARS)}`
+  return `text, not JSON (${reply.text.length} chars): ${JSON.stringify(reply.text.slice(0, 80))}${reply.text.length > 80 ? '…' : ''}`
 }
 
 const IMAGE_EXPECTS =
@@ -705,7 +945,8 @@ function formatValue(value: unknown): string {
 }
 
 function errorText(thrown: unknown): string {
-  if (thrown instanceof Error) return `${thrown.name}: ${thrown.message}`
+  // The engine's text for what the interpreter did not name ("evaluating 'i'") is about its own variables.
+  if (thrown instanceof Error) return `${thrown.name}: ${thrown.message.replace(/^(undefined|null) is not an object \(evaluating '[^']*'\)$/, '$1 is not an object')}`
   return formatValue(thrown)
 }
 
@@ -721,8 +962,17 @@ async function formatResult(run: {
   line?: number
   /** The nested calls, listed after the error of a failed script. */
   made?: readonly CodemodeCall[]
+  /** Each MCP call's reply, by its row, outlined in that list. */
+  replies?: ReadonlyMap<CodemodeCall, KeptReply>
+  /** Where each of those replies was saved, by its row. */
+  replyPaths?: ReadonlyMap<CodemodeCall, string>
+  lateCalls?: ReadonlySet<CodemodeCall>
+  /** Tool outputs Claude Code saved to files, listed so a later script can filter them again. */
+  savedOutputs?: readonly SavedRecord[]
   maxOutputTokens?: number
   save?: (text: string) => Promise<string | undefined>
+  /** Writes the whole list of saved outputs when the result lists only some; answers its path. */
+  saveManifest?: (text: string) => Promise<string | undefined>
 }): Promise<string> {
   const seconds = ((performance.now() - run.started) / 1000).toFixed(1)
   const pictures = run.images === 0 ? '' : `, ${run.images} image${run.images === 1 ? '' : 's'}`
@@ -732,12 +982,15 @@ async function formatResult(run: {
 
   // Colors and cursor moves from commands are noise to the model, and cost tokens.
   let text = plainText(run.output.join('\n'))
-  const limit = (run.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS) * CHARS_PER_TOKEN
+  const asked = run.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+  const limit = Math.min(asked, MAX_OUTPUT_TOKENS) * CHARS_PER_TOKEN
   if (text.length > limit) {
     const path = await run.save?.(text)
     const half = Math.floor(limit / 2)
     const where = path === undefined ? 'the full output could not be saved' : `full output in ${path}`
-    text = `${text.slice(0, half)}\n\n[... ${text.length - limit} characters omitted; ${where} ...]\n\n${text.slice(-half)}`
+    // Past MAX_OUTPUT_TOKENS, Claude Code would replace the whole result with a preview of its start.
+    const lowered = asked > MAX_OUTPUT_TOKENS ? `; max_output_tokens ${asked} was lowered to ${MAX_OUTPUT_TOKENS}, the most Claude Code shows whole` : ''
+    text = `${text.slice(0, half)}\n\n[... ${text.length - limit} characters omitted; ${where}${lowered} ...]\n\n${text.slice(-half)}`
   }
 
   const parts = [header]
@@ -745,21 +998,64 @@ async function formatResult(run: {
   if (run.error !== undefined) {
     const near = run.line ? ` (near line ${run.line})` : ''
     parts.push(`Script error: ${plainText(errorText(run.error))}${near}`)
-    if (run.made !== undefined && run.made.length > 0) parts.push(callList(run.made))
+    if (run.made !== undefined && run.made.length > 0) parts.push(callList(run.made, run.replies, run.replyPaths, run.lateCalls))
   }
+  if (run.savedOutputs !== undefined && run.savedOutputs.length > 0) parts.push(await savedList(run.savedOutputs, run.saveManifest))
   return parts.join('\n')
 }
-/** A failed script's nested calls, so a retry knows what already took effect. */
-function callList(made: readonly CodemodeCall[]): string {
+
+/**
+ * The files Claude Code saved the script's long tool outputs to. Past SAVED_OUTPUTS, the rest are counted
+ * and the whole list goes to a file, one JSON object per line, so none is lost to a later script.
+ */
+async function savedList(saved: readonly SavedRecord[], saveManifest?: (text: string) => Promise<string | undefined>): Promise<string> {
+  const shown = saved.slice(0, SAVED_OUTPUTS)
+  const lines = shown.map(entry => `- #${entry.call} ${entry.tool}${Object.keys(entry.args).length === 0 ? '' : `  ${argsPreview(entry.args)}`} → ${entry.path}${entry.chars === undefined ? '' : ` (${String(entry.chars).replace(/\B(?=(\d{3})+(?!\d))/g, ',')} chars)`}`)
+  const later = saved.length - shown.length
+  if (later > 0) {
+    const manifest = await saveManifest?.(saved.map(entry => JSON.stringify(entry)).join('\n'))
+    lines.push(`- … ${later} more; ${manifest === undefined ? 'the full list could not be saved' : `the full list (one JSON object per line) is in ${manifest}`}`)
+  }
+  return ['Saved outputs (readFile(path) in a script reads one back, up to 4 MiB; tools.Bash with jq or rg filters a larger one):', ...lines].join('\n')
+}
+/**
+ * A failed script's nested calls, so a retry knows what already took effect, each MCP reply outlined
+ * under its call (an outline the same tool already showed is not repeated), so a retry knows its shape.
+ */
+function callList(
+  made: readonly CodemodeCall[],
+  replies?: ReadonlyMap<CodemodeCall, KeptReply>,
+  replyPaths?: ReadonlyMap<CodemodeCall, string>,
+  lateCalls?: ReadonlySet<CodemodeCall>,
+): string {
   const shown = made.slice(-FAILURE_CALLS)
   const earlier = made.length - shown.length
-  const lines = shown.map(call => {
+  const outlined = new Set<string>()
+  let outlineChars = 0
+  const lines = shown.flatMap(call => {
     const args = call.args === '' ? '' : `  ${call.args}`
     const ms = call.ms === undefined ? '' : `  ${call.ms} ms`
-    const left = call.status === 'left' ? '  (still running when the script ended; it may still take effect)' : ''
-    return `  ${CALL_WORDS[call.status].padEnd(6)} ${call.tool}${args}${ms}${left}`
+    const left =
+      call.status === 'left'
+        ? '  (still running when the script ended; it may still take effect)'
+        : lateCalls?.has(call)
+          ? '  (ended after the error)'
+          : ''
+    const path = replyPaths?.get(call)
+    const line = `  ${CALL_WORDS[call.status].padEnd(6)} ${call.tool}${args}${ms}${left}${path === undefined ? '' : `  → ${path}`}`
+    const reply = replies?.get(call)?.reply
+    if (reply === undefined || outlineChars >= OUTLINES_CHARS) return [line]
+    const outline = replyOutline(reply)
+    if (outlined.has(`${call.tool} ${outline}`)) return [line]
+    outlined.add(`${call.tool} ${outline}`)
+    outlineChars += outline.length
+    return [line, `         ${outline}`]
   })
-  return ['Calls the script made:', ...(earlier > 0 ? [`  … ${earlier} earlier call${earlier === 1 ? '' : 's'}`] : []), ...lines].join('\n')
+  const saved =
+    replyPaths !== undefined && replyPaths.size > 0
+      ? ['Replies marked → are saved, each one\'s json as JSON (else its text): a retry reads them with JSON.parse(await readFile(path)) rather than calling again.']
+      : []
+  return ['Calls the script made:', ...(earlier > 0 ? [`  … ${earlier} earlier call${earlier === 1 ? '' : 's'}`] : []), ...lines, ...saved].join('\n')
 }
 
 const CALL_WORDS: Record<CodemodeCall['status'], string> = { running: 'left', ok: 'ok', error: 'failed', left: 'left' }

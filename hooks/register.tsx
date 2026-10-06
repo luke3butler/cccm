@@ -171,6 +171,11 @@ function recordWriter($: EngineInterface) {
 let declarations: Promise<Map<string, string>> | undefined
 
 /** What a script run needs from the engine, through `$`; the tool.call hook adds its row's calls and diffs. */
+/** Where codemode saves long outputs and a failed script's replies: a folder of the system's temporary one. */
+async function savedFolderOf($: EngineInterface): Promise<string> {
+  return `${((await $.env.get('TMPDIR')) ?? '/tmp').replace(/\/$/, '')}/claude-codemode`
+}
+
 function scriptHost($: EngineInterface, extra: Pick<Host, 'showCalls' | 'showDiffs'> = {}): Host {
   const kv: KeyValue = {
     get: key => $.store.get(key),
@@ -185,8 +190,7 @@ function scriptHost($: EngineInterface, extra: Pick<Host, 'showCalls' | 'showDif
     saveStore: async values => saveSessionStore(kv, await $.session.id(), values),
     saveOutput: async (name, text) => {
       try {
-        const tmp = ((await $.env.get('TMPDIR')) ?? '/tmp').replace(/\/$/, '')
-        const path = `${tmp}/claude-codemode/${name}.txt`
+        const path = `${await savedFolderOf($)}/${name}.txt`
         await $.fs.write(path, text)
         return path
       } catch {
@@ -194,6 +198,16 @@ function scriptHost($: EngineInterface, extra: Pick<Host, 'showCalls' | 'showDif
       }
     },
     readFile: async path => String(await $.fs.read(path)),
+    statFile: async path => {
+      const stat = await $.fs.stat(path, { resolve: true }).catch(() => undefined)
+      return stat?.kind === 'file' ? { size: stat.size, mtimeMs: stat.mtimeMs, realPath: stat.realPath } : undefined
+    },
+    savedFolder: async () => {
+      const folder = await savedFolderOf($)
+      return (await $.fs.stat(folder, { resolve: true }).catch(() => undefined))?.realPath
+    },
+    now: () => Date.now(),
+    warn: text => $.ui.log(text),
     declarationOf: async tool => {
       declarations ??= loadDeclarations($.plugin.root, async path => String(await $.fs.read(path)))
       return (await declarations).get(tool.name)

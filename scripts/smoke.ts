@@ -16,18 +16,36 @@ for (const [file, name] of [['claude-code-tools/index.d.ts', 'BuiltinToolInputs'
   if (existsSync(path)) for (const entry of parseDeclarations(readFileSync(path, 'utf8'), name)) declarations.set(...entry)
 }
 
+/** What the fake host's saveOutput wrote, by path. */
+const savedFiles = new Map<string, string>()
+const SAVED_FOLDER = '/tmp-smoke/claude-codemode'
+
 let inFlight = 0
 let maxInFlight = 0
 const host: Host = {
   listTools: async () => [
     { name: 'Bash', description: 'Run a shell command.', mcp: false },
     { name: 'Read', description: 'Read a file.', mcp: false },
+    { name: 'Write', description: 'Write a file.', mcp: false },
     { name: 'mcp__big__dump', description: 'A large MCP output.', mcp: true },
     { name: 'mcp__slow__wait', description: 'Never answers.', mcp: true },
+    { name: 'mcp__slow__late', description: 'Answers after 100 ms.', mcp: true },
+    { name: 'mcp__big__overflow', description: 'An output Claude Code saved to a file.', mcp: true },
+    { name: 'mcp__dev-radius__list-all-items', description: 'Lists items; hyphens in its server and tool names.', mcp: true },
   ],
   callTool: async input =>
-    input.tool === 'Read'
+    input.tool === 'Read' && input.file_path === '/secret.md'
+      ? { deny: 'Permission to read /secret.md has been denied.' }
+      : input.tool === 'Write'
+      ? (savedFiles.set(String(input.file_path), String(input.content)), { result: { type: 'create' }, text: `File created successfully at: ${input.file_path}` })
+      : input.tool === 'Read'
       ? { result: { type: 'file_unchanged', file: { filePath: input.file_path } }, text: 'Wasted call — file unchanged since your last Read.' }
+      : input.tool === 'mcp__big__overflow'
+      ? { result: { content: [{ type: 'text', text: 'Too big; stored at /p/smoke/tool-results/mcp-big-overflow-1.txt.' }] }, text: 'Too big; stored at /p/smoke/tool-results/mcp-big-overflow-1.txt.' }
+      : input.tool === 'mcp__dev-radius__list-all-items'
+      ? { result: { content: [{ type: 'text', text: `items ${input.q}` }] }, text: `items ${input.q}` }
+      : input.tool === 'mcp__slow__late'
+      ? new Promise(resolve => setTimeout(() => resolve({ result: { content: [{ type: 'text', text: '{"done":true}' }] }, text: '{"done":true}' }), 100))
       : input.tool === 'mcp__slow__wait'
       ? new Promise(() => {})
       : input.tool === 'Bash'
@@ -49,8 +67,19 @@ const host: Host = {
   sessionUsage: async args => ({ startedAt: 1, context: { window: 200000, percent: 12 }, rateLimits: [], cost: { usd: 0.5 }, args }),
   sessionMessages: async args => (args?.agentId === 'gone' ? { deny: 'no such agent' } : [{ role: 'user', text: 'hi', toolUses: [] }]),
   saveStore: async () => {},
-  saveOutput: async () => undefined,
-  readFile: async path => (path === '/notes.md' ? 'one\ntwo\nthree\n' : `full ${path}`),
+  saveOutput: async (name, text) => {
+    savedFiles.set(`${SAVED_FOLDER}/${name}.txt`, text)
+    return `${SAVED_FOLDER}/${name}.txt`
+  },
+  savedFolder: async () => SAVED_FOLDER,
+  readFile: async path => savedFiles.get(path) ?? (path === '/notes.md' ? 'one\ntwo\nthree\n' : path.includes('/tool-results/') ? `{"issues":[${'1,'.repeat(40)}1]}` : `full ${path}`),
+  statFile: async path =>
+    savedFiles.has(path)
+      ? { size: savedFiles.get(path)!.length, mtimeMs: Date.now(), realPath: path }
+      : path.includes('/smoke/tool-results/') || path === '/notes.md' || path === '/secret.md'
+      ? { size: 83, mtimeMs: Date.now(), realPath: path }
+      : undefined,
+  now: () => Date.now(),
   declarationOf: async tool => declarations.get(tool.name),
   sleep: (ms, signal) =>
     new Promise((resolve, reject) => {
@@ -69,6 +98,8 @@ const checks: [string, string, string][] = [
   ['session facts', 'return [session.id, session.cwd, session.projectDir, session.repo.root, session.turns].join(" ")', 'smoke /work/sub /work /work 3'],
   ['session.usage', 'const u = await session.usage({ breakdown: "summary" })\nreturn [u.context.percent, u.cost.usd, u.args.breakdown].join(" ")', '12 0.5 summary'],
   ['session.messages', 'const m = await session.messages()\nconst d = await session.messages({ agentId: "gone" })\nreturn m[0].text + " " + d.deny', 'hi no such agent'],
+  ['MCP overflow recovered whatever the notice says', 'const r = await tools.mcp__big__overflow({})\nreturn JSON.parse(r.text).issues.length + " " + r.fullOutputPath', '41 /p/smoke/tool-results/mcp-big-overflow-1.txt'],
+  ['saved outputs listed', 'await tools.mcp__big__overflow({})', 'Saved outputs (readFile(path) in a script reads one back, up to 4 MiB; tools.Bash with jq or rg filters a larger one):\n- #1 mcp__big__overflow → /p/smoke/tool-results/mcp-big-overflow-1.txt (94 chars)'],
   ['models.complete', 'return (await models.complete({ prompt: "hi" })).text', 'haiku: hi'],
   ['model calls in the header', 'await Promise.all([1, 2].map(n => models.complete({ prompt: String(n) })))', '0 tool calls, 2 model calls (2.0k tokens)'],
   ['models.complete without a reply rejects', 'await models.complete({ prompt: "overloaded" })', 'no reply (api-error 529 overloaded_error)'],
@@ -88,7 +119,39 @@ const checks: [string, string, string][] = [
   ['never settles after a call', 'await tools.Bash({ command: "x" })\nawait new Promise(() => {})', 'never settles'],
   ['long microtask chain is not stuck', 'for (let i = 0; i < 2000; i++) await Promise.resolve(i)\nreturn "done"', 'Script completed'],
 ]
-if (declarations.size > 0) checks.push(['Bash declaration', 'return (await describeTool("Bash")).declaration', 'command: string'])
+const LIST = 'tools.mcp__dev-radius__list-all-items'
+checks.push(
+  ['a hyphenated call', `return (${LIST}({ q: 1 })).then(r => r.text)`, 'items 1'],
+  ['a hyphenated call awaited, chained, in allSettled', `const a = await ${LIST}({ q: 2 })\nconst b = await ${LIST}({ q: 3 }).then(r => r.text)\nconst c = await Promise.allSettled([${LIST}({ q: 4 })])\nreturn [a.text, b, c[0].value.text].join(",")`, 'items 2,items 3,items 4'],
+  ['a hyphenated tool as a value', `const f = ${LIST}\nreturn (await f({ q: 5 })).text`, 'items 5'],
+  ['a subtraction that is not a tool name is left alone', `const n = 2\nreturn tools.Bash-n`, '\nnull'],
+  ['what the rewrite cannot join gets the hint', `return ${LIST}({ q: 6 }) * 2`, 'A hyphen in a tool name reads as a subtraction; write it as an underscore: tools.mcp__dev_radius__list_all_items'],
+  ['call in search results', 'return (await searchTools("items")).map(t => t.call).join(" ")', 'tools.mcp__dev_radius__list_all_items'],
+  ['call in ALL_TOOLS and describeNamespace', 'return [ALL_TOOLS.find(t => t.name === "Read").call, (await describeNamespace("dev-radius")).tools[0].call].join(" ")', 'tools.Read tools.mcp__dev_radius__list_all_items'],
+  ['describeTool joined onto a string, undeclared', 'return "x " + await describeTool("mcp__dev-radius__list-all-items")', 'x tools.mcp__dev_radius__list_all_items({…})'],
+)
+checks.push(
+  ['json on an MCP reply whose text is JSON', 'return (await tools.mcp__big__overflow({})).json.issues.length', '\n41'],
+  ['no json when the text is not JSON', 'return "json" in (await tools.mcp__big__dump({}))', '\nfalse'],
+  ['shape', 'return shape({ a: [{ b: 1 }, { b: "x", c: null }] })', '{ a: { b: number | string; c?: null }[] }'],
+  ['readFile of another file passes a Read that reads nothing, then reads it whole', 'return await readFile("/notes.md")', '1 tool call\none\ntwo'],
+    ['readFile refused as Read is', 'await readFile("/secret.md")', 'Script error: Error: Permission to read /secret.md has been denied. (near line 1)\nCalls the script made:\n  failed readFile  /secret.md'],
+  ['readFile reads an overflow file of this session without a Read', 'const t = await readFile("/p/smoke/tool-results/mcp-big-overflow-1.txt")\nreturn JSON.parse(t).issues.length', '0 tool calls\n41'],
+  ['readFile of a missing file', 'await readFile("/nowhere.txt")', 'readFile(): no file at /nowhere.txt.'],
+  ['writeFile writes through Write, non-strings as JSON, from the working directory', 'const p = await writeFile("out/a.json", { a: [1] })\nreturn p + " " + await readFile(p)', '2 tool calls\n/work/sub/out/a.json {"a":[1]}'],
+  ['writeFile round trip', 'const p = await writeFile("/w/b.txt", "plain")\nreturn [await readFile(p), await readFile(await writeFile("/w/c.json", [1, 2]))].join(" ")', '\nplain [1,2]'],
+  ['a read of undefined names the property and the expression', 'const j = { json: {} }\nreturn j.json.data.issues', "TypeError: Cannot read properties of undefined (reading 'issues'): j.json.data is undefined (near line 2)"],
+  ['a method call on undefined names the method and the expression', 'const r = { json: {} }\nreturn r.json.meetings.map(m => m.name)', "TypeError: Cannot read properties of undefined (reading 'map'): r.json.meetings is undefined (near line 2)"],
+  ['an unnamed read of undefined loses the engine variable', 'for (const x of undefined) {}', 'TypeError: undefined is not an object (near line 1)'],
+)
+if (declarations.size > 0) {
+  checks.push(
+    ['Bash declaration', 'return (await describeTool("Bash")).declaration', 'command: string'],
+    ['describeTool joined onto a string reads as the call', 'return "Bash\\n" + await describeTool("Bash")', 'Bash\ntools.Bash({ command: string;'],
+    ['describeTool printed shows its fields', 'return await describeTool("Bash")', '"call": "tools.Bash"'],
+    ['signature in search results', 'return (await searchTools("shell command"))[0].signature', '{ command: string;'],
+  )
+}
 
 let failed = 0
 const report = (name: string, ok: boolean, detail: string) => {
@@ -100,6 +163,66 @@ for (const [name, script, expected] of checks) {
   const { text: result } = await runScript(host, { script }, ctx)
   report(`${name} (${Math.round(performance.now() - started)} ms)`, result.includes(expected), result)
 }
+
+// A failed script outlines each MCP reply it got, once per tool and outline.
+const outlined = await runScript(host, { script: 'await tools.mcp__big__overflow({})\nawait tools.mcp__big__overflow({})\nawait tools.mcp__big__dump({})\nawait tools.Bash({ command: "x" })\nthrow new Error("wrong guess")' }, ctx)
+report(
+  'a failed script outlines its MCP replies',
+  outlined.text.includes('\n         json: { issues: number[] }') &&
+    outlined.text.split('json: {').length === 2 &&
+    outlined.text.includes('\n         text, not JSON (19 chars): "full /saved/mcp.txt"') &&
+    !/Bash  x .*\n {9}/.test(outlined.text),
+  outlined.text,
+)
+const replyPath = /mcp__big__overflow  \d+ ms  → (\S+)/.exec(outlined.text)?.[1]
+report(
+  'a failed script saves its MCP replies and says how to read them',
+  replyPath === `${SAVED_FOLDER}/smoke-reply-1.txt` && outlined.text.includes('JSON.parse(await readFile(path))') && !/ok {5}Bash  x .*→/.test(outlined.text),
+  outlined.text,
+)
+const reread = await runScript(host, { script: `const a = JSON.parse(await readFile(${JSON.stringify(replyPath)}))\nconst b = await readFile("${SAVED_FOLDER}/smoke-reply-3.txt")\nreturn [a.issues.length, b].join(" ")` }, ctx)
+report('readFile gives a saved reply back: its json, else its text', reread.text.includes('\n41 full /saved/mcp.txt'), reread.text)
+
+// max_output_tokens: at most 12000, the most Claude Code shows whole; the parameter wins over // @options.
+const capped = await runScript(host, { script: '// @options: {"max_output_tokens": 2000}\nreturn "x".repeat(60000)', max_output_tokens: 14000 }, ctx)
+report(
+  'a max_output_tokens past 12000 is lowered, and says so',
+  capped.text.length < 50_000 && capped.text.includes('characters omitted; full output in') && capped.text.includes('max_output_tokens 14000 was lowered to 12000, the most Claude Code shows whole'),
+  capped.text.slice(0, 300),
+)
+const optioned = await runScript(host, { script: '// @options: {"max_output_tokens": 14000}\nreturn "x".repeat(60000)', max_output_tokens: 1000 }, ctx)
+report('the parameter wins over // @options', optioned.text.length < 5000 && !optioned.text.includes('lowered'), optioned.text.slice(0, 300))
+const fits = await runScript(host, { script: 'return "x".repeat(45000)', max_output_tokens: 14000 }, ctx)
+report('output that fits says nothing of the cap', !fits.text.includes('omitted') && !fits.text.includes('lowered'), fits.text.slice(0, 300))
+
+// A failed script's result waits for its tool calls still running, at most 5 s, and only when there are any.
+const timed = async (script: string) => {
+  const at = performance.now()
+  const ran = await runScript(host, { script }, ctx)
+  return { text: ran.text, ms: performance.now() - at }
+}
+const late = await timed('tools.mcp__slow__late({})\nthrow new Error("boom")')
+report(
+  'a tool call that ends soon after the error is reported as it ended, its reply saved',
+  /ok {5}mcp__slow__late  \d+ ms  \(ended after the error\)  → \S+-reply-1\.txt\n {9}json: \{ done: boolean \}/.test(late.text) && late.ms < 1000,
+  late.text,
+)
+const nothing = await timed('await tools.mcp__big__dump({})\nthrow new Error("boom")')
+report('a failed script with nothing running does not wait', nothing.ms < 200 && !nothing.text.includes('ended after'), `${nothing.ms} ms\n${nothing.text}`)
+const never = await timed('tools.mcp__slow__wait({})\nthrow new Error("boom")')
+report(
+  'a tool call still running after 5 s is left',
+  never.ms >= 4900 && never.ms < 6000 && never.text.includes('left   mcp__slow__wait  (still running when the script ended; it may still take effect)'),
+  `${never.ms} ms\n${never.text}`,
+)
+const interrupt = new AbortController()
+setTimeout(() => interrupt.abort(), 200)
+const interruptedAt = performance.now()
+const interrupted = await runScript(host, { script: 'tools.mcp__slow__wait({})\nthrow new Error("boom")' }, { ...ctx, signal: interrupt.signal })
+const interruptedMs = performance.now() - interruptedAt
+report('an interrupt ends the wait', interruptedMs < 600 && interrupted.text.includes('left   mcp__slow__wait'), `${interruptedMs} ms\n${interrupted.text}`)
+const timedOut = await timed('// @options: {"timeout_ms": 100}\ntools.mcp__slow__wait({})\nawait sleep(1000)')
+report('no wait after a timeout', timedOut.ms < 400 && timedOut.text.includes('Timed out after 100 ms'), `${timedOut.ms} ms\n${timedOut.text}`)
 
 // Model calls queue past four in flight.
 maxInFlight = 0
