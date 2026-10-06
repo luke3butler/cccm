@@ -61,9 +61,6 @@ A first line `// @options: {"max_output_tokens": 2000, "timeout_ms": 60000}` set
 |---|---|
 | `tools.<name>(args)` | Calls any tool Claude Code can call, MCP tools included, through the same permission checks and hooks as a direct call. Characters that aren't valid in an identifier become `_`. A hyphenated name written as is (`tools.mcp__tl-dv__list-meetings(...)`, which JavaScript reads as a subtraction) is joined back into the tool's name before the script runs |
 | `ALL_TOOLS` | Every callable tool as `{ name, call, description }`, `call` being how a script writes it (`tools.mcp__tl_dv__list_meetings`) |
-| `searchTools(query, { limit?, namespace? })` | Tools ranked by relevance (BM25) as `{ name, call, description, signature? }`, the signature being the tool's arguments on one line. `limit` defaults to 8; `namespace` is an MCP server name |
-| `describeTool(name)` | `{ name, call, description, mcp, signature?, declaration? }`, the declaration being the tool's input type as TypeScript with its doc comments. Joined onto a string, it reads as the call: `tools.Bash({ command: string; … })` |
-| `describeNamespace(server)` | `{ name, tools }` for an MCP server, each tool as `searchTools` gives it, or `undefined` |
 | `session` | `{ id, cwd, projectDir, repo, turns }`, read once per run. `repo` is `{ root, remote }`, or `null` outside a git repository; `turns` is how many prompts the person has sent |
 | `session.usage({ breakdown?, columns? })` | `$.session.usage` as the engine answers it: `{ startedAt, context, rateLimits, cost }`. `breakdown: "full"` sends a token-count request per tool and memory file, as /context does; `"summary"` estimates locally |
 | `session.messages({ agentId?, as? })` | `$.session.messages` as the engine answers it: the newest 4096 messages as `{ role, text, toolUses, toolResults? }`, or `{ role, content }` with `as: "api"`; with `agentId`, that agent's, or `{ deny }` |
@@ -92,7 +89,13 @@ The reference in the `script` parameter's description is in the model's context 
 | Long output | `text` (and Bash's `result.stdout`) hold the whole output, up to 4 MiB; `fullOutputPath` names the saved file. An MCP result Claude Code replaced with a notice naming its file is read back from that file, found by where it is (this session's `tool-results` folder), when it was written (during the call) and its size, not by the notice's wording | Rejects when the result looks like such a notice but its file can't be found or read, and logs a line saying so, so a script never takes the notice for data |
 | Read of a file the conversation already holds | The file's text in Read's numbered-line format, not Claude Code's "file unchanged" stub | |
 
-`Promise.allSettled()` keeps the calls that succeed. The `script` parameter's description lists the inputs of the common built-in tools: Bash, Read, Write, Edit, WebFetch and WebSearch, plus Glob and Grep when registered. `describeTool` has declarations for the built-in tools and for MCP tools connected when the plugin last loaded.
+`Promise.allSettled()` keeps the calls that succeed. A rejection for arguments the tool refused (an MCP server's `-32602`, Claude Code's `InputValidationError`) adds where the tool's schema is: a ToolSearch call of the model's own.
+
+### Tools' arguments
+
+Codemode doesn't describe tools' arguments: the model learns them the way it does for a direct call. A tool in its tool list comes with its schema; one behind ToolSearch, as most MCP tools are, needs a ToolSearch call first (`select:<name>,<name>` loads several, keywords find them), made by the model itself, since a ToolSearch call from a script returns names to the script and loads nothing. That costs no prompt cache: the schema reaches the model as a reference in that call's result, and the tool list at the head of the prompt never changes.
+
+Plugins can't read tools' schemas: `$.tool.list()` gives names and descriptions, and the declarations Claude Code lays in `.claude-plugin/types/` exist only for a plugin loaded from a folder of the person's own (`--plugin-dir`), never for an install.
 
 ### The result
 

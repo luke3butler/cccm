@@ -41,7 +41,8 @@ Keep the calls that succeed:
   const settled = await Promise.allSettled(files.map(f => tools.Read({ file_path: f })))
   const read = settled.filter(r => r.status === "fulfilled").map(r => r.value.result.file.content)
 
-Finding tools: searchTools("calendar events", { limit: 5, namespace: "google" }) or describeNamespace("tldv") gives each tool's call and signature; describeTool(name).declaration when you need what an argument means.
+Finding tools: call ToolSearch yourself, before the script: "select:mcp__x__a,mcp__x__b" loads those tools' schemas, keywords ("calendar events") find and load the best matches. Its result reaches you, not a script, so a script's own ToolSearch call loads nothing. ALL_TOOLS names every tool a script can call, with how to write it:
+  ALL_TOOLS.filter(t => t.name.startsWith("mcp__tldv__")).map(t => t.call)
 
 A command longer than a script should wait on (a build, a dev server): run it with Bash run_in_background and end your turn. Its notification starts your next one, and a pane can show its output live (help("panes")).`,
   },

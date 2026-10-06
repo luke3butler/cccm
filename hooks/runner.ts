@@ -7,11 +7,9 @@ import type { CodemodeCall, CodemodeCalls, CodemodeDiffs, CodemodeJson } from '.
 import { addDiffs, fileDiffsOf } from './diffs'
 import { helpText, type HelpLimits } from './help'
 import { h, paneGlobals, taskFileOf, type PaneHost } from './panes'
-import { namespaceOf, normalizeNamespace, rankTools, type ToolEntry } from './search'
 import { shape } from './shape'
 import { table } from './table'
 import { plainText } from './text'
-import { compactDeclaration } from './declarations'
 import { AT, TICK, guard, joinToolNames, keepSources } from './guard'
 import Sval from './vendor/sval.js'
 
@@ -70,7 +68,9 @@ export const DESCRIPTION = `Run a JavaScript script that calls Claude Code's too
 
 The script is the body of an async function in a sandboxed interpreter: top-level await and return work, and there are no Node APIs, file system, network or timers. It reaches everything through tools: tools.Bash({ command }), tools.Read({ file_path }), tools.mcp__<server>__<tool>({ ... }).
 
-Read the script parameter's description before your first script: it lists the globals, what tool calls resolve to, and the inputs of common built-in tools.
+Read the script parameter's description before your first script: it lists the globals and what tool calls resolve to.
+
+A tool whose schema you haven't seen (most MCP tools wait behind ToolSearch) needs a ToolSearch call of your own first, as a direct call would: select:<name>,<name> loads several at once, keywords find them. A script's own ToolSearch call loads nothing for you.
 
 A script worth keeping can be saved and run again by name, with args: the name parameter lists the saved ones. Run one in place of writing it again.`
 
@@ -81,7 +81,7 @@ return help("panes") reads a topic's detail and examples; help() lists the topic
 
 Globals:
 - tools.<name>(args): call a tool with one object of arguments (hyphens become underscores: mcp__tldv__list-meetings is tools.mcp__tldv__list_meetings), through the same permission checks and hooks as your own calls. Built-in tools resolve to { text, result }: text is what you would read, result the tool's structured record (Bash: stdout, stderr; Read: result.file.content, the raw text). Bash rejects on a non-zero exit, the output in the error; end a command with "|| true" to read a failing one's output. MCP tools resolve to { content, structuredContent, text, json }, json being structuredContent or text parsed as JSON. A failed or denied call rejects with the tool's error text; Promise.allSettled() keeps the calls that succeed. An output Claude Code would show you as a preview is whole in text, up to 4 MiB. help("tools")
-- ALL_TOOLS lists every tool as { name, call, description }; searchTools(query, { limit?, namespace? }) and describeNamespace(server) find tools as { name, call, description, signature? }: call is how a script writes the tool, signature its arguments on one line. describeTool(name) adds mcp and declaration, the arguments with doc comments. Most MCP tools are not in your own tool list.
+- ALL_TOOLS lists every tool a script can call as { name, call, description }, call being how a script writes it. Their arguments come from ToolSearch, called by you before the script.
 - session: { id, cwd, projectDir, repo, turns (prompts sent) }. session.usage({ breakdown? }) resolves { startedAt, context, rateLimits, cost }; breakdown "full" sends a token-count request per tool, "summary" doesn't. session.messages({ agentId?, as?: "api" }) resolves the transcript as { role, text, toolUses, toolResults? } rows.
 - shape(value): its outline as a type, { id: string; tags?: string[] }[]. Before a long script, learn an unfamiliar tool's reply in a short one that returns shape(r.json); calling a free read again is fine. Keep a reply that cost money or changed something rather than calling again: store() a small one, or writeFile() a large one to your scratchpad.
 - writeFile(path, value) (a tools.Write; non-strings as JSON) / readFile(path): text up to 4 MiB, through Read's permissions, past its 256 KB limit. A failed script's result outlines and saves each MCP reply it got, for readFile.
@@ -95,15 +95,12 @@ Globals:
 
 The result starts with "Script completed" or "Script failed", then the output; a failed script keeps its partial output and ends with "Script error:", the line that ran last, and the calls it made. Output past max_output_tokens (default ${DEFAULT_MAX_OUTPUT_TOKENS}, at most ${MAX_OUTPUT_TOKENS}) keeps its start and end, and the full text is saved to a file. Tool calls are real: calls made before a failure are not undone. Await every call you start. CPU-heavy work fails after about 8 seconds of interpreter time; time spent waiting on tools does not count.`
 
-/**
- * The tool's input schema; `reference` is appended to the script parameter's description (the built-in
- * tools' inputs), and `saved` to the name parameter's (the saved scripts).
- */
-export function inputSchema(reference = '', saved = '') {
+/** The tool's input schema; `saved` is appended to the name parameter's description (the saved scripts). */
+export function inputSchema(saved = '') {
   return {
     type: 'object',
     properties: {
-      script: { type: 'string', description: SCRIPT_HELP + reference },
+      script: { type: 'string', description: SCRIPT_HELP },
       name: {
         type: 'string',
         description: `A saved script to run in place of script, by its name. It reads args as the args global. help("saved") says how to save one.\n\n${saved}`,
@@ -144,8 +141,6 @@ export type Host = {
   now: () => number
   /** Tells the person something went wrong that the script's result alone would hide. */
   warn?: (text: string) => void
-  /** The tool's input type as TypeScript, when the engine's declarations have it. */
-  declarationOf: (tool: ToolInfo) => Promise<string | undefined>
   /** Resolves after `ms`; rejects when `signal` aborts. */
   sleep: (ms: number, signal: AbortSignal) => Promise<void>
   /** One completion; `signal` cuts it when the script ends. */
@@ -175,6 +170,14 @@ export type RunContext = {
   toolUseId: string
   /** Globals beside the script's own, as a pane handler's argument. */
   globals?: Record<string, unknown>
+}
+
+/** Arguments a tool refused: JSON-RPC's invalid params from an MCP server, or Claude Code's own check of a built-in tool's. */
+const INVALID_ARGUMENTS = /-32602|InputValidationError/
+
+/** A tool's error, and for arguments it refused, where its schema is. */
+export function withSchemaHint(tool: string, error: string): string {
+  return INVALID_ARGUMENTS.test(error) ? `${error}\nIts arguments: call ToolSearch yourself with "select:${tool}" for its schema, then run the script again.` : error
 }
 
 /** An image a script added with image(), checked and typed by its signature. */
@@ -236,7 +239,6 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     byName.set(tool.name, tool)
     byName.set(identifierOf(tool.name), tool)
   }
-  const entries: ToolEntry[] = listed.map(tool => ({ name: tool.name, description: tool.description }))
   const callOf = (name: string) => `tools.${identifierOf(name)}`
 
   const [loaded, facts] = await Promise.all([host.loadStore(), host.sessionFacts()])
@@ -398,10 +400,10 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     if (saved !== undefined) savedOutputs.push({ call, tool: tool.name, args: plain, path: saved.path, chars: saved.text?.length })
     if (tool.mcp) {
       const reply = mcpResult(ran, saved)
-      if (ran.isError) throw Object.assign(new Error(reply.text || `${tool.name} failed.`), { result: reply })
+      if (ran.isError) throw Object.assign(new Error(withSchemaHint(tool.name, reply.text || `${tool.name} failed.`)), { result: reply })
       return reply
     }
-    if (ran.isError) throw new Error(ran.text ?? String(ran.result ?? `${tool.name} failed.`))
+    if (ran.isError) throw new Error(withSchemaHint(tool.name, ran.text ?? String(ran.result ?? `${tool.name} failed.`)))
     if (saved === undefined) return { text: ran.text ?? '', result: ran.result }
     const record = ran.result as Record<string, unknown> | undefined
     return {
@@ -424,7 +426,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
           const more = hyphenated.length > 3 ? ` and ${hyphenated.length - 3} more` : ''
           throw new ReferenceError(`No tool named ${key}. A hyphen in a tool name reads as a subtraction; write it as an underscore: ${shown}${more}`)
         }
-        throw new ReferenceError(`No tool named ${key}. Find tools with searchTools(), describeNamespace() or ALL_TOOLS.`)
+        throw new ReferenceError(`No tool named ${key}. ALL_TOOLS lists the tools a script can call; ToolSearch, called by you, finds and loads one.`)
       }
       return (args?: unknown) => callTool(tool, args)
     },
@@ -447,12 +449,6 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     return structuredClone(value)
   }
 
-  /** A found tool as a script sees it: how to write it, and its arguments on one line when declared. */
-  const foundTool = async (entry: ToolEntry) => {
-    const declaration = await track(() => host.declarationOf(byName.get(entry.name)!))
-    return { name: entry.name, call: callOf(entry.name), description: entry.description, ...(declaration ? { signature: compactDeclaration(declaration) } : {}) }
-  }
-
   const print = (...values: unknown[]) => {
     output.push(values.map(formatValue).join(' '))
   }
@@ -465,34 +461,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     tools,
     session: { ...structuredClone(facts), usage: sessionCall('usage', host.sessionUsage), messages: sessionCall('messages', host.sessionMessages) },
     models,
-    ALL_TOOLS: entries.map(entry => ({ name: entry.name, call: callOf(entry.name), description: entry.description })),
-    searchTools: async (query: unknown, options: { limit?: number; namespace?: string } = {}) =>
-      Promise.all(rankTools(entries, String(query ?? ''), options).map(foundTool)),
-    describeTool: async (name: unknown) => {
-      const tool = byName.get(String(name))
-      if (tool === undefined) return undefined
-      const declaration = await track(() => host.declarationOf(tool))
-      const signature = declaration === undefined ? undefined : compactDeclaration(declaration)
-      const described = {
-        name: tool.name,
-        call: callOf(tool.name),
-        description: tool.description,
-        mcp: tool.mcp,
-        ...(declaration ? { signature, declaration } : {}),
-      }
-      // Joined onto a string, it reads as the call; printed or returned, as its fields.
-      Object.defineProperty(described, 'toString', { value: () => `${described.call}(${signature ?? '{…}'})`, enumerable: false })
-      return described
-    },
-    describeNamespace: async (name: unknown) => {
-      const wanted = normalizeNamespace(String(name ?? ''))
-      const members = entries.filter(entry => {
-        const namespace = namespaceOf(entry.name)
-        return namespace !== undefined && normalizeNamespace(namespace) === wanted
-      })
-      if (members.length === 0) return undefined
-      return { name: namespaceOf(members[0]!.name), tools: await Promise.all(members.map(foundTool)) }
-    },
+    ALL_TOOLS: listed.map(tool => ({ name: tool.name, call: callOf(tool.name), description: tool.description })),
     text: (value: unknown) => print(value),
     shape: (value: unknown) => shape(value),
     writeFile: async (path: unknown, value: unknown) => {

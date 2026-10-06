@@ -88,24 +88,20 @@ test('an MCP call the server marks as an error rejects, with the reply on the er
   )
 
   expect(text).toContain('"hits"')
-  expect(text).toContain('MCP error -32602: Invalid arguments | MCP error -32602: Invalid arguments')
+  expect(text).toContain('MCP error -32602: Invalid arguments\\nIts arguments: call ToolSearch yourself with \\"select:mcp__dev-radius__search\\" for its schema, then run the script again. | MCP error -32602: Invalid arguments')
 })
 
-test('searchTools ranks by relevance and ALL_TOOLS leaves codemode out', async ($, on) => {
+test('ALL_TOOLS leaves codemode out, and says how a script writes each tool', async ($, on) => {
   stubEngine(on)
 
   const text = await run(
     $,
-    `const hits = await searchTools("search documents")
-     text(hits[0].name)
-     text(ALL_TOOLS.some(t => t.name === "mcp__codemode__run"))
-     const ns = await describeNamespace("dev-radius")
-     text(ns.tools.length)`,
+    `text(ALL_TOOLS.some(t => t.name === "mcp__codemode__run"))
+     text(ALL_TOOLS.filter(t => t.name.startsWith("mcp__dev-radius__")).length)
+     return ["mcp__tl-dv__list-meetings", "Read"].map(n => ALL_TOOLS.find(t => t.name === n).call).join(" ")`,
   )
 
-  expect(text).toContain('mcp__dev-radius__search')
-  expect(text).toContain('false')
-  expect(text).toContain('\n2')
+  expect(text).toContain('false\n2\ntools.mcp__tl_dv__list_meetings tools.Read')
 })
 
 test('a hyphenated tool name calls the tool instead of subtracting', async ($, on) => {
@@ -134,25 +130,6 @@ test('a hyphenated name the rewrite cannot join names the tool to write instead'
 
   expect(text).toContain('Script failed')
   expect(text).toContain('No tool named mcp__tl. A hyphen in a tool name reads as a subtraction; write it as an underscore: tools.mcp__tl_dv__list_meetings')
-})
-
-test('found tools carry how a script writes them, and describeTool joined onto text reads as the call', async ($, on) => {
-  stubEngine(on)
-
-  const text = await run(
-    $,
-    `const out = []
-     for (const n of ["mcp__tl-dv__list-meetings", "Read"]) out.push(n + "\\n" + await describeTool(n))
-     out.push((await searchTools("meetings"))[0].call, (await describeNamespace("tl-dv")).tools[0].call)
-     out.push(ALL_TOOLS.find(t => t.name === "Read").call)
-     return out.join("\\n")`,
-  )
-
-  expect(text).toContain('Script completed')
-  expect(text).not.toContain('[object Object]')
-  expect(text).toContain('mcp__tl-dv__list-meetings\ntools.mcp__tl_dv__list_meetings(')
-  expect(text).toContain('Read\ntools.Read(')
-  expect(text).toContain('tools.mcp__tl_dv__list_meetings\ntools.mcp__tl_dv__list_meetings\ntools.Read')
 })
 
 test('a failed tool call rejects, and allSettled keeps the rest', async ($, on) => {

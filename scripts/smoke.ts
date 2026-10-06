@@ -1,20 +1,8 @@
 // Runs the codemode runner outside Claude Code, against a fake host: `bun scripts/smoke.ts`.
 // A check that does not need `claude plugin test`, which runs only while hooks modules are on.
 
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
-
-import { compactDeclaration, inlineDeclarations, parseDeclarations } from '../hooks/declarations'
 import { runScript, toolResult, type Host } from '../hooks/runner'
 import { loadSessionStore, saveSessionStore, type KeyValue } from '../hooks/store'
-
-const root = join(import.meta.dir, '..')
-const typesDir = join(root, '.claude-plugin/types')
-const declarations = new Map<string, string>()
-for (const [file, name] of [['claude-code-tools/index.d.ts', 'BuiltinToolInputs'], ['claude-code-mcp/index.d.ts', 'McpToolInputs']] as const) {
-  const path = join(typesDir, file)
-  if (existsSync(path)) for (const entry of parseDeclarations(readFileSync(path, 'utf8'), name)) declarations.set(...entry)
-}
 
 /** What the fake host's saveOutput wrote, by path. */
 const savedFiles = new Map<string, string>()
@@ -80,7 +68,6 @@ const host: Host = {
       ? { size: 83, mtimeMs: Date.now(), realPath: path }
       : undefined,
   now: () => Date.now(),
-  declarationOf: async tool => declarations.get(tool.name),
   sleep: (ms, signal) =>
     new Promise((resolve, reject) => {
       const timer = setTimeout(resolve, ms)
@@ -126,9 +113,8 @@ checks.push(
   ['a hyphenated tool as a value', `const f = ${LIST}\nreturn (await f({ q: 5 })).text`, 'items 5'],
   ['a subtraction that is not a tool name is left alone', `const n = 2\nreturn tools.Bash-n`, '\nnull'],
   ['what the rewrite cannot join gets the hint', `return ${LIST}({ q: 6 }) * 2`, 'A hyphen in a tool name reads as a subtraction; write it as an underscore: tools.mcp__dev_radius__list_all_items'],
-  ['call in search results', 'return (await searchTools("items")).map(t => t.call).join(" ")', 'tools.mcp__dev_radius__list_all_items'],
-  ['call in ALL_TOOLS and describeNamespace', 'return [ALL_TOOLS.find(t => t.name === "Read").call, (await describeNamespace("dev-radius")).tools[0].call].join(" ")', 'tools.Read tools.mcp__dev_radius__list_all_items'],
-  ['describeTool joined onto a string, undeclared', 'return "x " + await describeTool("mcp__dev-radius__list-all-items")', 'x tools.mcp__dev_radius__list_all_items({…})'],
+  ['call in ALL_TOOLS', 'return ["Read", "mcp__dev-radius__list-all-items"].map(n => ALL_TOOLS.find(t => t.name === n).call).join(" ")', 'tools.Read tools.mcp__dev_radius__list_all_items'],
+  ['a missing tool points at ALL_TOOLS and ToolSearch', 'return tools.Nope({})', 'No tool named Nope. ALL_TOOLS lists the tools a script can call; ToolSearch, called by you, finds and loads one.'],
 )
 checks.push(
   ['json on an MCP reply whose text is JSON', 'return (await tools.mcp__big__overflow({})).json.issues.length', '\n41'],
@@ -144,15 +130,6 @@ checks.push(
   ['a method call on undefined names the method and the expression', 'const r = { json: {} }\nreturn r.json.meetings.map(m => m.name)', "TypeError: Cannot read properties of undefined (reading 'map'): r.json.meetings is undefined (near line 2)"],
   ['an unnamed read of undefined loses the engine variable', 'for (const x of undefined) {}', 'TypeError: undefined is not an object (near line 1)'],
 )
-if (declarations.size > 0) {
-  checks.push(
-    ['Bash declaration', 'return (await describeTool("Bash")).declaration', 'command: string'],
-    ['describeTool joined onto a string reads as the call', 'return "Bash\\n" + await describeTool("Bash")', 'Bash\ntools.Bash({ command: string;'],
-    ['describeTool printed shows its fields', 'return await describeTool("Bash")', '"call": "tools.Bash"'],
-    ['signature in search results', 'return (await searchTools("shell command"))[0].signature', '{ command: string;'],
-  )
-}
-
 let failed = 0
 const report = (name: string, ok: boolean, detail: string) => {
   if (!ok) failed += 1
@@ -269,12 +246,4 @@ report('store keeps the 50 newest', map.size === 50 && map.has('session:s59') &&
 await saveSessionStore(kv, 's59', {})
 report('store drops an emptied session', !map.has('session:s59'), [...map.keys()].join(' '))
 
-if (declarations.size > 0) {
-  const bash = compactDeclaration(declarations.get('Bash')!)
-  report('compact declaration', bash.startsWith('{ command: string; timeout?: number;') && !bash.includes('/**'), bash)
-  const inline = inlineDeclarations(declarations, new Set(['Bash', 'Read', 'Edit']))
-  report('inline declarations', inline.includes('tools.Read({ file_path: string;') && !inline.includes('tools.Write'), inline)
-  console.log(inlineDeclarations(declarations))
-}
-console.log(declarations.size > 0 ? `${declarations.size} tool declarations parsed` : 'no declarations laid yet: load the plugin once')
 process.exit(failed === 0 ? 0 : 1)

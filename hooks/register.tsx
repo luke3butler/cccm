@@ -3,7 +3,6 @@ import type { EngineInterface, Register, ToolCallArgs } from 'claude-code'
 
 import type { CodemodeCalls, CodemodeDiffs, CodemodeFollow, CodemodeJson, CodemodeNode, CodemodePane, CodemodePaneEvent } from '../types'
 
-import { inlineDeclarations, loadDeclarations } from './declarations'
 import { drawPane, type DrawnImage, type PaneElements } from './pane-view'
 import {
   MAX_FOLLOWS,
@@ -47,8 +46,6 @@ const pixels = atom({ plugin: 'codemode', key: 'pixels' } as const, null as bool
 /** Task output files remembered; the oldest drop off. */
 const MAX_TASK_FILES = 200
 
-/** The built-in tools' inputs the script parameter carries, made on session.start. */
-let reference = ''
 /** The saved-script folders as last listed (names, sizes, times), so a prompt re-registers only on a change. */
 let savedStamp: string | undefined
 /** How much of the saved scripts' names the command's hint shows. */
@@ -115,7 +112,7 @@ async function registerTool($: EngineInterface): Promise<void> {
   if (stamp === savedStamp) return
   savedStamp = stamp
   const entries = await listSaved(savedFsOf($), places)
-  await $.tool.register({ name: TOOL_NAME, description: DESCRIPTION, inputSchema: inputSchema(reference, savedListing(entries)) })
+  await $.tool.register({ name: TOOL_NAME, description: DESCRIPTION, inputSchema: inputSchema(savedListing(entries)) })
   const names = entries.filter(entry => entry.error === undefined).map(entry => entry.name).join('|')
   await $.command.register({
     name: 'codemode',
@@ -167,9 +164,6 @@ function recordWriter($: EngineInterface) {
   })
 }
 
-/** Tool input types by tool name, read once per load. */
-let declarations: Promise<Map<string, string>> | undefined
-
 /** What a script run needs from the engine, through `$`; the tool.call hook adds its row's calls and diffs. */
 /** Where codemode saves long outputs and a failed script's replies: a folder of the system's temporary one. */
 async function savedFolderOf($: EngineInterface): Promise<string> {
@@ -208,10 +202,6 @@ function scriptHost($: EngineInterface, extra: Pick<Host, 'showCalls' | 'showDif
     },
     now: () => Date.now(),
     warn: text => $.ui.log(text),
-    declarationOf: async tool => {
-      declarations ??= loadDeclarations($.plugin.root, async path => String(await $.fs.read(path)))
-      return (await declarations).get(tool.name)
-    },
     // A short wait (the runner's next-turn check) stays on the clock; longer ones must not spend the budget.
     sleep: async (ms, signal) => {
       if (ms < 50) return $.clock.sleep(ms, { signal })
@@ -717,14 +707,6 @@ export const register: Register = on => {
     } catch {
       // No panes to bring back.
     }
-    declarations = loadDeclarations($.plugin.root, async path => String(await $.fs.read(path)))
-    let available: Set<string> | undefined
-    try {
-      available = new Set((await $.tool.list()).map(tool => tool.name))
-    } catch {
-      // List every declared one.
-    }
-    reference = inlineDeclarations(await declarations, available)
     savedStamp = undefined
     await registerTool($)
     await $.command.register({
