@@ -1,7 +1,7 @@
 /** A JSON value a script keeps with `store(key, value)`. */
 export type CodemodeJson = string | number | boolean | null | CodemodeJson[] | { [key: string]: CodemodeJson }
 
-/** One tool call a script made, as its row draws it. `left` is a call still running when the script ended. */
+/** One tool call a script made, as its row draws it. `left` is a call cancelled because it was still running when the script ended. */
 export type CodemodeCall = { tool: string; args: string; status: 'running' | 'ok' | 'error' | 'left'; ms?: number }
 
 /** A script's tool calls so far: counts, and the most recent calls. */

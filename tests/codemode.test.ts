@@ -695,6 +695,25 @@ test('a failed script waits for its tool calls still running, and reports how th
   expect(text).toContain('json: { id: string }')
 })
 
+test('a tool call still running when the script ends is cancelled', async ($, on) => {
+  stubEngine(on)
+  let isAborted = false
+  let hasEnded = false
+  on('tool.call', { tool: /^mcp__dev-radius__fetch$/ }, async (_$, _e, next) => {
+    next.signal.addEventListener('abort', () => (isAborted = true))
+    await new Promise(resolve => setTimeout(() => resolve(undefined), 100))
+    hasEnded = !isAborted
+    return { result: { content: [{ type: 'text', text: '{"id":"X-1"}' }] }, text: '{"id":"X-1"}' }
+  })
+
+  const text = await run($, 'tools.mcp__dev_radius__fetch({ id: 1 })\nreturn "done"')
+  await new Promise(resolve => setTimeout(() => resolve(undefined), 150))
+
+  expect(text).toContain('done')
+  expect(isAborted).toBe(true)
+  expect(hasEnded).toBe(false)
+})
+
 test('an MCP overflow whose file cannot be found rejects and tells the person', async ($, on) => {
   stubOverflow(on, NOTICE, {})
   const logged: string[] = []

@@ -164,12 +164,23 @@ function recordWriter($: EngineInterface) {
   })
 }
 
-/** What a script run needs from the engine, through `$`; the tool.call hook adds its row's calls and diffs. */
 /** Where codemode saves long outputs and a failed script's replies: a folder of the system's temporary one. */
 async function savedFolderOf($: EngineInterface): Promise<string> {
   return `${((await $.env.get('TMPDIR')) ?? '/tmp').replace(/\/$/, '')}/claude-codemode`
 }
 
+/** A script's tool calls on their way to the engine, each with the signal that cancels it once its script is over. */
+const cancellable: { key: string; signal: AbortSignal }[] = []
+
+/** A tool call's tool and arguments, the same whether the script made it or the tool.call hook sees it. */
+function callKey(input: Record<string, unknown>): string {
+  const { tool_use_id: _id, consent: _consent, agentId: _agent, ...call } = input
+  return JSON.stringify(Object.keys(call).sort().map(key => [key, call[key]]))
+}
+
+const CANCELLED = 'Cancelled: the codemode script ended.'
+
+/** What a script run needs from the engine, through `$`; the tool.call hook adds its row's calls and diffs. */
 function scriptHost($: EngineInterface, extra: Pick<Host, 'showCalls' | 'showDiffs'> = {}): Host {
   const kv: KeyValue = {
     get: key => $.store.get(key),
@@ -179,7 +190,16 @@ function scriptHost($: EngineInterface, extra: Pick<Host, 'showCalls' | 'showDif
   }
   return {
     listTools: () => $.tool.list(),
-    callTool: input => $.tool.call(input as unknown as ToolCallArgs),
+    callTool: async (input, signal) => {
+      const entry = { key: callKey(input), signal }
+      cancellable.push(entry)
+      try {
+        return await $.tool.call(input as unknown as ToolCallArgs)
+      } finally {
+        const at = cancellable.indexOf(entry)
+        if (at >= 0) cancellable.splice(at, 1)
+      }
+    },
     loadStore: async () => loadSessionStore(kv, await $.session.id()),
     saveStore: async values => saveSessionStore(kv, await $.session.id(), values),
     saveOutput: async (name, text) => {
@@ -270,14 +290,14 @@ function programsOn($: EngineInterface): NonNullable<typeof programs> {
     ) as unknown as PaneHost
     return {
       ...host,
-      callTool: after(async input => {
+      callTool: after(async (input, signal) => {
         const now = Date.now()
         const recent = (calls.get(id) ?? []).filter(at => at > now - 60_000)
         if (recent.length >= MAX_PROGRAM_CALLS_PER_MINUTE) {
           throw new Error(`The pane "${id}" made ${MAX_PROGRAM_CALLS_PER_MINUTE} tool calls in the last minute, its limit; slow its every.ms.`)
         }
         calls.set(id, [...recent, now])
-        return host.callTool(input)
+        return host.callTool(input, signal)
       }),
       sleep: after(host.sleep),
       complete: after(host.complete),
@@ -839,6 +859,26 @@ export const register: Register = on => {
   on('turn.start', ($, e, next) => {
     pendingWakes.clear()
     return next(e)
+  })
+
+  // A script's tool call ends with its script: one still running then is cancelled. Bash's run_in_background
+  // is how a script starts what should outlive it.
+  on('tool.call', async ($, e, next) => {
+    if (next.origin.plugin !== $.plugin.name) return next(e)
+    const at = cancellable.findIndex(entry => entry.key === callKey(e))
+    if (at < 0) return next(e)
+    const { signal } = cancellable.splice(at, 1)[0]!
+    if (signal.aborted) return { deny: CANCELLED }
+    let onAbort = () => {}
+    const cancelled = new Promise<{ deny: string }>(resolve => {
+      onAbort = () => resolve({ deny: CANCELLED })
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      return await Promise.race([next(e), cancelled])
+    } finally {
+      signal.removeEventListener('abort', onAbort)
+    }
   })
 
   // A background command's output file, kept so ui.follow can read it: the model's own Bash calls and a

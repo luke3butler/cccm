@@ -100,7 +100,7 @@ Plugins can't read tools' schemas: `$.tool.list()` gives names and descriptions,
 ### The result
 
 - **Header:** "Script completed" or "Script failed", the run time, then the tool calls, model calls (with tokens, when reported) and images.
-- **A failed script:** keeps its partial output and ends with "Script error:". A runtime error also names the line that ran last ("near line N"). Then come the calls the script made (the latest 20), each ok, failed or left running, so a retry knows what already took effect. Tool calls still running when the script failed aren't cancelled, so the result waits up to 5 s for them (not after a timeout or an interrupt, and not at all when none is running), and one that ends in time shows how it ended, marked "(ended after the error)". Under each MCP call that succeeded is an outline of its reply (`json: { issues: { key: string }[]; total: number }`, or a note that the text isn't JSON), shown once per tool and outline, so a retry knows the reply's shape without calling the tool again to look. Each of those replies is also saved (its `json`, or its text), its path after the call, for the retry to read with `readFile()` rather than call again: some calls cost money or change things.
+- **A failed script:** keeps its partial output and ends with "Script error:". A runtime error also names the line that ran last ("near line N"). Then come the calls the script made (the latest 20), each ok, failed or cancelled, so a retry knows what already took effect. Tool calls still running when the script failed get up to 5 s to end (not after a timeout or an interrupt, and not at all when none is running): one that ends in time shows how it ended, marked "(ended after the error)", and the rest are cancelled. Under each MCP call that succeeded is an outline of its reply (`json: { issues: { key: string }[]; total: number }`, or a note that the text isn't JSON), shown once per tool and outline, so a retry knows the reply's shape without calling the tool again to look. Each of those replies is also saved (its `json`, or its text), its path after the call, for the retry to read with `readFile()` rather than call again: some calls cost money or change things.
 - **Saved outputs:** when Claude Code saved any of the script's tool outputs to files, the result ends with a list of them: the call's number in the script, the tool, its args and the file, so a later script can read one back with `readFile()`, or filter a larger one with `tools.Bash`, without calling the tool again. Past 10, the rest are counted and the whole list, with each call's full args, is saved to a file of one JSON object per line, named in the result.
 - **Plain text:** colours and other escape sequences in the output are removed, and a line a carriage return rewrote (a progress bar) keeps what a terminal would show last. They cost the model tokens and say nothing to it, and Claude Code refuses to draw text that holds them, in the result and in a pane alike.
 
@@ -114,13 +114,13 @@ Plugins can't read tools' schemas: `$.tool.list()` gives names and descriptions,
 | Images | 20 per script, 5 MB of base64 each; PNG, JPEG, GIF or WebP |
 | Store | 262144 characters per value, 1048576 in all |
 | Stuck promises | A script awaiting a promise nothing can settle fails at once |
-| Calls still running at the end | Finish, and their results are thrown away |
+| Calls still running at the end | Cancelled (after a failed script's 5 s wait); what they already did stands. Bash's `run_in_background` starts what should outlive the script |
 | Nesting | A script can't start another codemode script |
 | Environment | No Node APIs, file system, network or timers: everything goes through `tools` |
 
 ### The row in the transcript
 
-The tool's row shows the script, folded to 8 lines with a button that shows all of it; a saved script run by name shows its name in the title and its args below. Below it are the latest 8 nested calls, with live status (running, ok, failed, left running) and duration. A failed script's row has a red bullet and says "script failed" (Claude Code itself draws the call as a success, since a plugin's tool can't answer with an error).
+The tool's row shows the script, folded to 8 lines with a button that shows all of it; a saved script run by name shows its name in the title and its args below. Below it are the latest 8 nested calls, with live status (running, ok, failed, cancelled) and duration. A failed script's row has a red bullet and says "script failed" (Claude Code itself draws the call as a success, since a plugin's tool can't answer with an error).
 
 The result under the row is codemode's too: the output without its header line (the row's title has the counts), the first 5 lines with a button that shows the rest, and a failed script's error and calls in full. A result with images, and a call Claude Code itself refused or interrupted, keep Claude Code's own result block.
 

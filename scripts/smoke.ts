@@ -10,6 +10,8 @@ const SAVED_FOLDER = '/tmp-smoke/claude-codemode'
 
 let inFlight = 0
 let maxInFlight = 0
+/** The signal the latest mcp__slow__wait call was given. */
+let waitSignal: AbortSignal | undefined
 const host: Host = {
   listTools: async () => [
     { name: 'Bash', description: 'Run a shell command.', mcp: false },
@@ -21,7 +23,7 @@ const host: Host = {
     { name: 'mcp__big__overflow', description: 'An output Claude Code saved to a file.', mcp: true },
     { name: 'mcp__dev-radius__list-all-items', description: 'Lists items; hyphens in its server and tool names.', mcp: true },
   ],
-  callTool: async input =>
+  callTool: async (input, signal) =>
     input.tool === 'Read' && input.file_path === '/secret.md'
       ? { deny: 'Permission to read /secret.md has been denied.' }
       : input.tool === 'Write'
@@ -35,7 +37,7 @@ const host: Host = {
       : input.tool === 'mcp__slow__late'
       ? new Promise(resolve => setTimeout(() => resolve({ result: { content: [{ type: 'text', text: '{"done":true}' }] }, text: '{"done":true}' }), 100))
       : input.tool === 'mcp__slow__wait'
-      ? new Promise(() => {})
+      ? ((waitSignal = signal), new Promise(() => {}))
       : input.tool === 'Bash'
       ? { result: { stdout: 'preview', stderr: '', persistedOutputPath: '/saved/bash.txt' }, text: '<persisted-output>\nOutput too large. Full output saved to: /saved/bash.txt\n\nPreview' }
       : { result: { content: [{ type: 'text', text: 'preview' }] }, text: '<persisted-output>\nOutput too large. Full output saved to: /saved/mcp.txt\n\nPreview' },
@@ -188,16 +190,19 @@ const nothing = await timed('await tools.mcp__big__dump({})\nthrow new Error("bo
 report('a failed script with nothing running does not wait', nothing.ms < 200 && !nothing.text.includes('ended after'), `${nothing.ms} ms\n${nothing.text}`)
 const never = await timed('tools.mcp__slow__wait({})\nthrow new Error("boom")')
 report(
-  'a tool call still running after 5 s is left',
-  never.ms >= 4900 && never.ms < 6000 && never.text.includes('left   mcp__slow__wait  (still running when the script ended; it may still take effect)'),
+  'a tool call still running after 5 s is cancelled',
+  never.ms >= 4900 && never.ms < 6000 && waitSignal?.aborted === true && never.text.includes('cancelled mcp__slow__wait  (still running when the script ended; what it already did stands)'),
   `${never.ms} ms\n${never.text}`,
 )
+waitSignal = undefined
+const unawaited = await timed('tools.mcp__slow__wait({})\nreturn "done"')
+report('a successful script cancels the calls it left running', unawaited.ms < 200 && waitSignal?.aborted === true && unawaited.text.includes('done'), `${unawaited.ms} ms\n${unawaited.text}`)
 const interrupt = new AbortController()
 setTimeout(() => interrupt.abort(), 200)
 const interruptedAt = performance.now()
 const interrupted = await runScript(host, { script: 'tools.mcp__slow__wait({})\nthrow new Error("boom")' }, { ...ctx, signal: interrupt.signal })
 const interruptedMs = performance.now() - interruptedAt
-report('an interrupt ends the wait', interruptedMs < 600 && interrupted.text.includes('left   mcp__slow__wait'), `${interruptedMs} ms\n${interrupted.text}`)
+report('an interrupt ends the wait', interruptedMs < 600 && interrupted.text.includes('cancelled mcp__slow__wait'), `${interruptedMs} ms\n${interrupted.text}`)
 const timedOut = await timed('// @options: {"timeout_ms": 100}\ntools.mcp__slow__wait({})\nawait sleep(1000)')
 report('no wait after a timeout', timedOut.ms < 400 && timedOut.text.includes('Timed out after 100 ms'), `${timedOut.ms} ms\n${timedOut.text}`)
 

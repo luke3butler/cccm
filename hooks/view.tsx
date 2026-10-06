@@ -94,7 +94,7 @@ function drawCall(Text: Elements['Text'], call: CodemodeCall): RenderElement {
       <Text bold>{shortName(call.tool)}</Text>
       {call.args.length > 0 ? <Text dimColor>{` ${plainText(call.args)}`}</Text> : null}
       {call.ms !== undefined ? <Text dimColor>{` ${duration(call.ms)}`}</Text> : null}
-      {call.status === 'left' ? <Text dimColor> (still running when the script ended)</Text> : null}
+      {call.status === 'left' ? <Text dimColor> (cancelled when the script ended)</Text> : null}
     </Text>
   )
 }

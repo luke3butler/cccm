@@ -127,7 +127,8 @@ export type ScriptInput = {
 /** What the runner needs from the engine; register.ts makes every `$` call. */
 export type Host = {
   listTools: () => Promise<ToolInfo[]>
-  callTool: (input: { tool: string } & Record<string, unknown>) => Promise<ToolCallResult>
+  /** Calls a tool; one still running when `signal` aborts is cancelled. */
+  callTool: (input: { tool: string } & Record<string, unknown>, signal: AbortSignal) => Promise<ToolCallResult>
   loadStore: () => Promise<Record<string, CodemodeJson>>
   /** Applies a script's store() calls onto the session's values as saved now. */
   saveStore: (changes: StoreChanges) => Promise<void>
@@ -250,6 +251,8 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
 
   // Ends the host waits (sleeps, the deadline) once the script is over.
   const stop = new AbortController()
+  // Cancels the tool calls still running once the script's result is settled (after a failed script's wait).
+  const cancel = new AbortController()
   const onAbort = () => stop.abort()
   ctx.signal.addEventListener('abort', onAbort, { once: true })
 
@@ -308,7 +311,14 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
   /** A script's path, relative ones from the session's working directory, as Read and Write take it. */
   const absolutePath = (path: string) => (path.startsWith('/') ? path : `${facts.cwd.replace(/\/$/, '')}/${path.replace(/^\.\//, '')}`)
 
-  const callTool = async (tool: ToolInfo, args: unknown) => {
+  // A call the script never awaited may fail once it is over (cancelled with it): that is no unhandled rejection.
+  const callTool = (tool: ToolInfo, args: unknown) => {
+    const called = startCall(tool, args)
+    called.catch(() => {})
+    return called
+  }
+
+  const startCall = async (tool: ToolInfo, args: unknown) => {
     check()
     if (args !== undefined && (typeof args !== 'object' || args === null || Array.isArray(args))) {
       throw new TypeError(`tools.${identifierOf(tool.name)}() takes one object of arguments.`)
@@ -391,7 +401,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
   /** Runs one tool call, the script's `call`th, as the script's `tools.<name>()` resolves it. */
   const runCall = async (tool: ToolInfo, plain: Record<string, unknown>, call: number) => {
     const startedMs = host.now()
-    const ran: ToolCallResult = await track(() => host.callTool({ ...plain, tool: tool.name }))
+    const ran: ToolCallResult = await track(() => host.callTool({ ...plain, tool: tool.name }, cancel.signal))
     if (ran.deny !== undefined) throw new Error(ran.deny)
     if (!ran.isError) diffs = addDiffs(diffs, fileDiffsOf(tool.name, ran.result))
     // Read answers a file the conversation already holds with a stub pointing at that earlier result,
@@ -585,8 +595,8 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     stop.abort()
     ctx.signal.removeEventListener('abort', onAbort)
   }
-  // A tool call runs on when the script fails, uncancelled; one that ends soon after is reported as it ended
-  // (and its MCP reply saved), so a retry needn't call it again to learn. Not after a timeout or interrupt.
+  // A tool call still running when the script fails gets a moment to end: one that does is reported as it
+  // ended (and its MCP reply saved), so a retry needn't call it again to learn. Not after a timeout or interrupt.
   if (error !== undefined && toolCallsRunning.size > 0 && !isStopped && !ctx.signal.aborted && performance.now() < deadline) {
     // Model calls and sleeps were cancelled with the script; only tool calls are worth the wait.
     for (const call of made) if (call.status === 'running' && !byName.has(call.tool)) call.status = 'left'
@@ -606,6 +616,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
     for (const call of made) if (call.status === 'running') call.status = 'left'
     showCalls()
   }
+  cancel.abort()
 
   // Pane writes the script did not await land before its result does.
   await host.panes?.flush()
@@ -1010,7 +1021,7 @@ function callList(
     const ms = call.ms === undefined ? '' : `  ${call.ms} ms`
     const left =
       call.status === 'left'
-        ? '  (still running when the script ended; it may still take effect)'
+        ? '  (still running when the script ended; what it already did stands)'
         : lateCalls?.has(call)
           ? '  (ended after the error)'
           : ''
@@ -1031,7 +1042,7 @@ function callList(
   return ['Calls the script made:', ...(earlier > 0 ? [`  … ${earlier} earlier call${earlier === 1 ? '' : 's'}`] : []), ...lines, ...saved].join('\n')
 }
 
-const CALL_WORDS: Record<CodemodeCall['status'], string> = { running: 'left', ok: 'ok', error: 'failed', left: 'left' }
+const CALL_WORDS: Record<CodemodeCall['status'], string> = { running: 'cancelled', ok: 'ok', error: 'failed', left: 'cancelled' }
 
 function tokenCount(tokens: number): string {
   return tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1)}k`

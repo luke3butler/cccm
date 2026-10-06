@@ -47,13 +47,13 @@ Finding tools: call ToolSearch yourself, before the script: "select:mcp__x__a,mc
 A command longer than a script should wait on (a build, a dev server): run it with Bash run_in_background and end your turn. Its notification starts your next one, and a pane can show its output live (help("panes")).`,
   },
   output: {
-    summary: 'images, the output limit, calls left running',
+    summary: 'images, the output limit, calls cancelled when the script ends',
     text: limits => `# output
 
 - A top-level return of an object shows as pretty JSON.
 - image(value) takes a data: URL, an image block ({ type: "image", data, mimeType }) or what tools.Read resolves to for an image file: PNG, JPEG, GIF or WebP, 5 MB of base64 each, ${limits.maxImages} per script. Never text() image data.
 - Output past max_output_tokens (default ${limits.defaultMaxOutputTokens}, at most ${limits.maxOutputTokens}, the most Claude Code shows whole) keeps its start and end; the result names the file holding all of it. The parameter wins over the // @options line.
-- Calls still running when the script ends finish unseen, except that a failed script's result waits up to 5 s for its tool calls and says how they ended. A script awaiting a promise nothing can settle fails at once. timeout_ms ends a script mid-call.`,
+- Calls still running when the script ends are cancelled; what they already did stands. A failed script's result first waits up to 5 s for its tool calls and says how they ended. To start something that should outlive the script, use tools.Bash with run_in_background: true. A script awaiting a promise nothing can settle fails at once. timeout_ms ends a script mid-call.`,
   },
   models: {
     summary: 'defaults, limits and a worked example of models.complete and models.classify',
