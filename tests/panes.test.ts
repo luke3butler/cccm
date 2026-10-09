@@ -1,4 +1,4 @@
-import type { ToolCallArgs, ToolInfo } from 'claude-code'
+import type { PromptAutocompleteInput, PromptAutocompleteResult, ToolCallArgs, ToolInfo } from 'claude-code'
 import { expect, test, type Engine } from 'claude-code/testing'
 
 import { range } from '../hooks/charts'
@@ -10,6 +10,13 @@ declare const setTimeout: (run: () => void, ms: number) => unknown
 const TOOLS: ToolInfo[] = [{ name: 'Bash', description: 'Run a shell command.', mcp: false }]
 
 type TestOn = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[1]
+
+/** Raises prompt.autocomplete, which the test kit raises though its typed `$` leaves it out. */
+function autocomplete($: Engine, text: string): Promise<PromptAutocompleteResult> {
+  const start = text.search(/\S*$/)
+  const input: PromptAutocompleteInput = { text, cursor: text.length, token: text.slice(start), start }
+  return ($.prompt as unknown as { autocomplete: (e: PromptAutocompleteInput) => Promise<PromptAutocompleteResult> }).autocomplete(input)
+}
 
 /** A session with nothing stored, whose panes the surface places and lists. */
 function stubEngine(on: TestOn, opened: { id: string; title?: string }[] = [], surfaces: ('terminal' | 'desktop' | 'mobile')[] = ['terminal']): void {
@@ -90,6 +97,14 @@ await ui.set("colors", "data.log", "\\x1b[33mwarn\\x1b[0m 50%\\r100%")`)
   expect(texts).toContain('bold')
   expect(texts.some(one => one.includes('100%') && !one.includes('50%'))).toBe(true)
   expect(texts.some(one => one.includes('\x1b'))).toBe(false)
+})
+
+test('typing /codemode-pane\'s id suggests the session\'s panes', async ($, on) => {
+  stubEngine(on)
+  on('prompt.autocomplete', () => ({ suggestions: [] }))
+  await run($, TRIAGE)
+  expect((await autocomplete($, '/codemode-pane tr')).suggestions).toEqual([{ text: 'triage', description: 'Failing tests' }])
+  expect((await autocomplete($, '/codemode-pane x')).suggestions).toEqual([])
 })
 
 test('presses reach a later script through the inbox, and the next prompt says so', async ($, on) => {

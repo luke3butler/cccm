@@ -144,7 +144,7 @@ A script worth running again is saved as a file and run by name, by the model or
 
   Arg types are `string`, `number`, `boolean`, `object` and `array`. An arg `meta` doesn't declare is refused, a required one must be given, and defaults fill the rest. Without `meta.args`, `args` is whatever object was given.
 - **The model** runs one with the tool's `name` and `args` in place of `script`. The `name` parameter's description lists the saved scripts with their args and descriptions, so the model runs one rather than writing it again. The listing is registered again at the next prompt after the folders change, and only then, so the tool list stays as the prompt cache has it. A run reads the file when it runs, so a script saved this turn runs at once.
-- **You** run one with `/codemode <name> [args]`, with no model turn: `/codemode ping example.com count=2`. Words fill the args in `meta`'s order, `key=value` names one, quotes keep spaces, and a JSON object gives them all. The output shows as the command's, and the model reads it too. A pane it opens seats at any width, since you asked for it. `/codemode` alone lists the saved scripts and any that don't load.
+- **You** run one with `/codemode <name> [args]`, with no model turn: `/codemode ping example.com count=2`. Words fill the args in `meta`'s order, `key=value` names one, quotes keep spaces, and a JSON object gives them all. The output shows as the command's, and the model reads it too. A pane it opens seats at any width, since you asked for it. `/codemode` alone lists the saved scripts and any that don't load. As you type the name, the prompt box suggests the saved scripts that match, with their args and description.
 - A pane a saved script opens keeps the code it opened with, so editing the file changes the next run, not an open pane.
 
 ## Panes
@@ -185,7 +185,7 @@ A record holds four parts, each written by one side:
 - **Showing by state:** any element takes `when: { "values.tab": "logs" }`. The element draws only while each path equals the value, is one of a list, differs under `{ not }`, or is present under `{ exists: true }`. Tabs and error lines need no script.
 - **Hover:** a Box with a `key` is a hover scope. `hover` props on it and on what's beneath it restyle as the pointer moves, and `display: "flex"` reveals a Box drawn `display: "none"`. A `position: "absolute"` Box placed with `top` and `left` makes a card that moves nothing. The engine applies all of it, so no hook runs.
 - **Fallbacks:** `ui.open` resolves `fallbacks` for anything the session's surfaces won't draw as written, such as an Image on a terminal without pixels or an Input on mobile. That way the model doesn't assume the person saw it.
-- **Placement:** a pane the model opens counts as unasked, so the terminal places it from 144 columns only (110 if it was opened before). The person can open it at any width with `/codemode-pane [id]`.
+- **Placement:** a pane the model opens counts as unasked, so the terminal places it from 144 columns only (110 if it was opened before). The person can open it at any width with `/codemode-pane [id]`, whose typeahead lists the session's panes.
 - **Limits:**
   - 20 panes per session, and 100 events per inbox (the oldest dropped).
   - 64 KiB of JSON per view and 512 KiB per record. A followed list past the record's limit drops its oldest half.

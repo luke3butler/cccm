@@ -1,5 +1,5 @@
 import { atom, memberOf, read, update } from 'claude-code'
-import type { EngineInterface, Register, ToolCallArgs } from 'claude-code'
+import type { EngineInterface, PromptAutocompleteInput, PromptAutocompleteSuggestion, Register, ToolCallArgs } from 'claude-code'
 
 import type { CodemodeCalls, CodemodeDiffs, CodemodeFollow, CodemodeJson, CodemodeNode, CodemodePane, CodemodePaneEvent } from '../types'
 
@@ -24,7 +24,7 @@ import {
   type PaneHost,
 } from './panes'
 import { DESCRIPTION, TOOL_NAME, inputSchema, runScript, toolResult, type Host, type RunContext } from './runner'
-import { argsOf, commandArgs, findSaved, listSaved, savedListing, savedPlaces, savedReport, type SavedFs, type SavedMeta, type SavedPlace } from './saved'
+import { argsOf, argsSignature, commandArgs, findSaved, listSaved, savedListing, savedPlaces, savedReport, type SavedEntry, type SavedFs, type SavedMeta, type SavedPlace } from './saved'
 import { loadSessionStore, saveSessionStore, type KeyValue } from './store'
 import { drawToolResult, drawToolUse, hasImages } from './view'
 
@@ -48,8 +48,8 @@ const MAX_TASK_FILES = 200
 
 /** The saved-script folders as last listed (names, sizes, times), so a prompt re-registers only on a change. */
 let savedStamp: string | undefined
-/** How much of the saved scripts' names the command's hint shows. */
-const MAX_HINT_CHARS = 80
+/** The saved scripts that load, as last listed, for /codemode's typeahead. */
+let savedEntries: SavedEntry[] = []
 
 function savedFsOf($: EngineInterface): SavedFs {
   return {
@@ -83,8 +83,8 @@ async function savedStampOf($: EngineInterface, places: SavedPlace[]): Promise<s
 }
 
 /**
- * Registers the tool, its name parameter listing the saved scripts, and /codemode with their names as
- * its hint; again only when the folders changed since, so the tool list stays as the prompt cached it.
+ * Registers the tool, its name parameter listing the saved scripts, and /codemode, keeping the scripts
+ * for its typeahead; again only when the folders changed since, so the tool list stays as the prompt cached it.
  */
 /** The saved script `name` and its checked args, or why it can't run: missing, not loading, or the args wrong. */
 async function savedScript(
@@ -112,14 +112,29 @@ async function registerTool($: EngineInterface): Promise<void> {
   if (stamp === savedStamp) return
   savedStamp = stamp
   const entries = await listSaved(savedFsOf($), places)
+  savedEntries = entries.filter(entry => entry.error === undefined)
   // Keep the tool in the prompt's list: behind ToolSearch, as MCP tools are by default, the model seldom reaches for it.
   await $.tool.register({ name: TOOL_NAME, description: DESCRIPTION, isDeferred: false, inputSchema: inputSchema(savedListing(entries)) })
-  const names = entries.filter(entry => entry.error === undefined).map(entry => entry.name).join('|')
-  await $.command.register({
-    name: 'codemode',
-    description: 'Run a saved codemode script, or list them',
-    argumentHint: names === '' ? '[name] [args]' : `[${names.length > MAX_HINT_CHARS ? `${names.slice(0, MAX_HINT_CHARS - 1)}…` : names}] [args]`,
-  })
+  await $.command.register({ name: 'codemode', description: 'Run a saved codemode script, or list them', argumentHint: '[name] [args]' })
+}
+
+/** The typeahead rows for the word after `/codemode` or `/codemode-pane`: saved scripts, or panes, starting with it. */
+async function commandSuggestions($: EngineInterface, e: PromptAutocompleteInput): Promise<PromptAutocompleteSuggestion[]> {
+  const command = /^\s*\/(codemode|codemode-pane)\s+$/.exec(e.text.slice(0, e.start))?.[1]
+  if (command === undefined) return []
+  const word = e.token.toLowerCase()
+  if (command === 'codemode') {
+    return savedEntries
+      .filter(entry => entry.name.toLowerCase().startsWith(word))
+      .map(entry => ({
+        text: entry.name,
+        label: `${entry.name}${argsSignature(entry.args)}`,
+        description: [entry.description, entry.scope].filter(part => part !== undefined).join(' · '),
+      }))
+  }
+  return (await allPanes($))
+    .filter(pane => pane.id.toLowerCase().startsWith(word))
+    .map(pane => ({ text: pane.id, description: `${pane.title}${pane.isOpen ? '' : ' (closed)'}` }))
 }
 
 
@@ -795,6 +810,12 @@ export const register: Register = on => {
       { signal: next.signal, budget: next.budget, toolUseId: `command-${name}-${Date.now()}`, globals: { args: saved.args } },
     )
     return { text: run.images.length === 0 ? run.text : `${run.text}\n(${run.images.length} image${run.images.length === 1 ? '' : 's'} not shown: a command's output is text.)` }
+  })
+
+  // Typing /codemode's name or /codemode-pane's id lists the saved scripts or the panes that match.
+  on('prompt.autocomplete', async ($, e, next) => {
+    const mine = await commandSuggestions($, e).catch(() => [])
+    return mine.length === 0 ? next(e) : { suggestions: [...(await next(e)).suggestions, ...mine] }
   })
 
   // A pane a script opened: its record's view, drawn with its values and data.

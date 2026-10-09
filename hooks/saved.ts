@@ -266,15 +266,19 @@ function wordsOf(text: string): string[] {
   return words
 }
 
+/** A saved script's args as `(host: string, count?: number)`, or '' when it declares none. */
+export function argsSignature(args: SavedEntry['args']): string {
+  return args === undefined ? '' : `(${Object.entries(args).map(([arg, spec]) => `${arg}${spec.required ? '' : '?'}: ${spec.type}`).join(', ')})`
+}
+
 /** The listing the tool's `name` parameter carries: each script, its args and what it does. */
 export function savedListing(entries: SavedEntry[]): string {
   const usable = entries.filter(entry => entry.error === undefined)
   if (usable.length === 0) return `None saved yet: save one as ${SAVED_DIR}/<name>.js under the project root, or ~/${SAVED_DIR}/<name>.js for every project. help("saved") has the file's shape.`
   return `Saved scripts:\n${usable
     .map(entry => {
-      const args = entry.args === undefined ? '' : `(${Object.entries(entry.args).map(([arg, spec]) => `${arg}${spec.required ? '' : '?'}: ${spec.type}`).join(', ')})`
       const about = entry.description ? `: ${clip(entry.description, LISTED_DESCRIPTION)}` : ''
-      return `- ${entry.name}${args}${about}`
+      return `- ${entry.name}${argsSignature(entry.args)}${about}`
     })
     .join('\n')}`
 }

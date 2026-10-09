@@ -1,4 +1,4 @@
-import type { ToolCallArgs, ToolInfo } from 'claude-code'
+import type { PromptAutocompleteInput, PromptAutocompleteResult, ToolCallArgs, ToolInfo } from 'claude-code'
 import { expect, test, type Engine } from 'claude-code/testing'
 import { argsOf, commandArgs, listSaved, parseSaved, savedListing, savedPlaces, type SavedFs } from '../hooks/saved'
 
@@ -47,6 +47,13 @@ function stubSaved(on: TestOn, files: Record<string, string>): void {
     if (text === undefined) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
     return { value: text }
   })
+}
+
+/** Raises prompt.autocomplete, which the test kit raises though its typed `$` leaves it out. */
+function autocomplete($: Engine, text: string): Promise<PromptAutocompleteResult> {
+  const start = text.search(/\S*$/)
+  const input: PromptAutocompleteInput = { text, cursor: text.length, token: text.slice(start), start }
+  return ($.prompt as unknown as { autocomplete: (e: PromptAutocompleteInput) => Promise<PromptAutocompleteResult> }).autocomplete(input)
 }
 
 async function run($: Engine, input: Record<string, unknown>): Promise<string> {
@@ -142,4 +149,22 @@ test('/codemode runs a saved script from the words typed, and alone lists them',
   const listed = (await command('')).text
   expect(listed).toContain('hello (personal)')
   expect(listed).toContain('ping (project) — Ping a host')
+})
+
+test('typing /codemode\'s name suggests the saved scripts that match, with args and description', async ($, on) => {
+  stubSaved(on, {
+    '/work/.claude/codemode/ping.js': PING,
+    '/home/me/.claude/codemode/hello.js': 'return "hello"',
+    '/home/me/.claude/codemode/broken.js': 'export const meta = { nope: 1 }',
+  })
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  on('prompt.autocomplete', () => ({ suggestions: [] }))
+  await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'composer' } })
+  const suggest = async (text: string) => (await autocomplete($, text)).suggestions
+
+  expect(await suggest('/codemode p')).toEqual([{ text: 'ping', label: 'ping(host: string, count?: number, quiet?: boolean)', description: 'Ping a host · project' }])
+  expect((await suggest('/codemode H')).map(row => row.text)).toEqual(['hello'])
+  expect(await suggest('/codemode b')).toEqual([])
+  expect(await suggest('/codemode ping p')).toEqual([])
+  expect(await suggest('ask about /codemode p')).toEqual([])
 })
