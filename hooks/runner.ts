@@ -1,7 +1,7 @@
 // Runs one codemode script: parses it, guards its loops and functions, runs it in
 // the sval interpreter with the script globals, and formats what it output.
 
-import type { ModelCompleteRequest, ModelCompleteResult, ModelEffort, ToolCallResult, ToolInfo } from 'claude-code'
+import type { ModelCompleteRequest, ModelCompleteResult, ModelEffort, ModelTextBlock, ToolCallResult, ToolInfo } from 'claude-code'
 
 import type { CodemodeCall, CodemodeCalls, CodemodeDiffs, CodemodeJson } from '../types'
 import { addDiffs, fileDiffsOf } from './diffs'
@@ -394,7 +394,7 @@ export async function runScript(host: Host, input: ScriptInput, ctx: RunContext)
   const models = {
     complete: async (request: unknown) => {
       const checked = completeRequest(request)
-      const result = await modelCall('complete', checked.model, checked.prompt, () => host.complete(checked, stop.signal), r => !r.isAnswered)
+      const result = await modelCall('complete', checked.model, joined(checked.prompt), () => host.complete(checked, stop.signal), r => !r.isAnswered)
       modelTokens += result.usage.input_tokens + result.usage.output_tokens
       if (!result.isAnswered) throw new Error(`models.complete(): no reply (${noReplyReason(result)}).`)
       return { text: result.text, usage: { ...result.usage } }
@@ -678,12 +678,34 @@ function argsPreview(args: Record<string, unknown>): string {
   return line.length > CALL_ARGS_CHARS ? `${line.slice(0, CALL_ARGS_CHARS - 1)}…` : line
 }
 
+/** A models.complete() prompt or system: a non-empty string, or blocks `{ text, cache? }`, copied. */
+function completeText(value: unknown, field: 'prompt' | 'system'): string | ModelTextBlock[] {
+  const shape = `models.complete() takes ${field} as a non-empty string or a list of { text, cache? } blocks`
+  if (typeof value === 'string') {
+    if (value === '') throw new TypeError(`${shape}.`)
+    return value
+  }
+  if (!Array.isArray(value) || value.length === 0) throw new TypeError(`${shape}.`)
+  return value.map((block: unknown, n) => {
+    const { text, cache, ...rest } = (typeof block === 'object' && block !== null ? block : {}) as Record<string, unknown>
+    if (typeof text !== 'string' || text === '') throw new TypeError(`${shape}: ${field}[${n}].text is not a non-empty string.`)
+    if (cache !== undefined && cache !== true) throw new TypeError(`${shape}: ${field}[${n}].cache is true or left out.`)
+    const extra = Object.keys(rest)[0]
+    if (extra !== undefined) throw new TypeError(`${shape}: ${field}[${n}] has ${extra}.`)
+    return cache === true ? { text, cache } : { text }
+  })
+}
+
+/** A prompt or system as one text, its blocks joined. */
+function joined(value: string | readonly ModelTextBlock[]): string {
+  return typeof value === 'string' ? value : value.map(block => block.text).join('')
+}
+
 /** A models.complete() argument, checked and with its defaults. */
 function completeRequest(request: unknown): ModelCompleteRequest {
   const given = (typeof request === 'object' && request !== null ? request : {}) as Record<string, unknown>
-  if (typeof given.prompt !== 'string' || given.prompt === '') throw new TypeError('models.complete() takes { prompt } as a non-empty string.')
-  const checked: ModelCompleteRequest = { model: typeof given.model === 'string' ? given.model : DEFAULT_MODEL, prompt: given.prompt }
-  if (typeof given.system === 'string') checked.system = given.system
+  const checked: ModelCompleteRequest = { model: typeof given.model === 'string' ? given.model : DEFAULT_MODEL, prompt: completeText(given.prompt, 'prompt') }
+  if (given.system !== undefined) checked.system = completeText(given.system, 'system')
   if (given.maxTokens !== undefined) {
     if (!Number.isInteger(given.maxTokens) || (given.maxTokens as number) < 1) throw new TypeError('models.complete(): maxTokens is a positive integer.')
     checked.maxTokens = given.maxTokens as number

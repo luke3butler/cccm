@@ -510,6 +510,31 @@ test('models.complete and models.classify run through the session client', async
   expect(text).toContain('"a summary",\n  "bug"')
   expect(asked).toEqual([expect.objectContaining({ model: 'haiku', prompt: 'Summarise this', effort: 'low' })])
 })
+test('models.complete passes prompt and system blocks with their cache marks, and checks them', async ($, on) => {
+  stubEngine(on)
+  const asked: unknown[] = []
+  on('model.complete', (_$, e) => {
+    asked.push(e)
+    return { value: { isAnswered: true, text: 'ok', usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 4000 } } }
+  })
+
+  const text = await run($, 'const r = await models.complete({ system: [{ text: "Be brief.", cache: true }], prompt: [{ text: "RULES", cache: true }, { text: "item 1" }] })\nreturn r.usage.cache_read_input_tokens')
+  expect(text).toContain('4000')
+  expect(asked).toEqual([
+    expect.objectContaining({
+      prompt: 'RULESitem 1',
+      promptBlocks: [{ text: 'RULES', cache: true }, { text: 'item 1' }],
+      system: 'Be brief.',
+      systemBlocks: [{ text: 'Be brief.', cache: true }],
+    }),
+  ])
+
+  expect(await run($, 'await models.complete({ prompt: [] })')).toContain('takes prompt as a non-empty string or a list of { text, cache? } blocks.')
+  expect(await run($, 'await models.complete({ prompt: [{ text: "a", cache: 1 }] })')).toContain('prompt[0].cache is true or left out')
+  expect(await run($, 'await models.complete({ prompt: "a", system: [{ text: "" }] })')).toContain('system[0].text is not a non-empty string')
+  expect(await run($, 'await models.complete({ prompt: [{ text: "a", ttl: "1h" }] })')).toContain('prompt[0] has ttl')
+  expect(asked.length).toBe(1)
+})
 test('the result shows the file changes the script\'s calls made, as Bash\'s row does', async ($, on) => {
   stubEngine(on)
   on('tool.call', { tool: 'Bash' }, () => ({

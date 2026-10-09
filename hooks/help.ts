@@ -72,7 +72,12 @@ Many items: label a batch in one complete call. It is faster and cheaper than a 
     model: "sonnet", maxTokens: 4096,
     prompt: 'Label each issue bug, feature or question. Reply with only JSON: {"<id>": "<label>"}.\\n\\n' + batch.map(i => i.id + ": " + i.title).join("\\n"),
   })))
-  const labels = Object.assign({}, ...replies.map(r => JSON.parse(r.text.slice(r.text.indexOf("{"), r.text.lastIndexOf("}") + 1))))`,
+  const labels = Object.assign({}, ...replies.map(r => JSON.parse(r.text.slice(r.text.indexOf("{"), r.text.lastIndexOf("}") + 1))))
+
+Long text every call repeats (rules, a document asked about item by item): pass prompt, or system, as blocks { text, cache? }, the fixed text first, and mark its last block cache: true. A call within five minutes that opens with the same text reads it from the cache, cheaper and faster; what follows the mark is paid in full each call. usage.cache_read_input_tokens shows the hit; both cache counts 0, the text was under the model's minimum (some thousand tokens) and nothing was cached:
+  const prompt = item => [{ text: RULES + "\\n\\n" + DOC, cache: true }, { text: "Item: " + item }]
+  const first = await models.complete({ prompt: prompt(items[0]) })  // writes the cache
+  const rest = await Promise.all(items.slice(1).map(item => models.complete({ prompt: prompt(item) })))`,
   },
   panes: {
     summary: 'elements, charts, images, hover, showing by state, binding, code a pane runs (render, on, every), asking the person, following background tasks, layout',
