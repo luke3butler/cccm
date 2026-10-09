@@ -112,7 +112,8 @@ async function registerTool($: EngineInterface): Promise<void> {
   if (stamp === savedStamp) return
   savedStamp = stamp
   const entries = await listSaved(savedFsOf($), places)
-  await $.tool.register({ name: TOOL_NAME, description: DESCRIPTION, inputSchema: inputSchema(savedListing(entries)) })
+  // Keep the tool in the prompt's list: behind ToolSearch, as MCP tools are by default, the model seldom reaches for it.
+  await $.tool.register({ name: TOOL_NAME, description: DESCRIPTION, isDeferred: false, inputSchema: inputSchema(savedListing(entries)) })
   const names = entries.filter(entry => entry.error === undefined).map(entry => entry.name).join('|')
   await $.command.register({
     name: 'codemode',
@@ -738,7 +739,6 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Keep the tool in the prompt's list: behind ToolSearch, as MCP tools are by default, the model seldom reaches for it.
   // The row shows the script and the calls it makes, not the tool's name and raw input.
   on('ui.render', { component: 'ToolUse', props: { tool: 'mcp__codemode__run' } }, async ($, e, next) => {
     if (e.component !== 'ToolUse') return next(e)
@@ -892,8 +892,6 @@ export const register: Register = on => {
     }
     return done
   })
-
-  on('tool.describe', { tool: 'mcp__codemode__run' }, async ($, e, next) => ({ ...(await next(e)), isDeferred: false }))
 
   on('tool.call', { tool: 'mcp__codemode__run' }, async ($, e, next) => {
     // Writes the latest calls to the row's state, one write at a time, so a burst of calls is one redraw.
